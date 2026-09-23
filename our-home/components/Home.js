@@ -2,9 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getSupabase } from "../lib/supabaseClient";
-import {
-  DEFAULT_SECTIONS, findUrls, guessSection, lineTotal, money, shopFromUrl, titleFromUrl, totals,
-} from "../lib/helpers";
+import { findUrls, lineTotal, money, normalizeUrl, shopFromUrl, titleFromUrl, totals } from "../lib/helpers";
 
 const newId = () =>
   typeof crypto !== "undefined" && crypto.randomUUID
@@ -14,7 +12,21 @@ const newId = () =>
         return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
       });
 
-const sectionsOf = (room) => (room?.sections?.length ? room.sections : DEFAULT_SECTIONS);
+const sectionsOf = (room) => room?.sections || [];
+const strip = ({ _local, _reading, ...row }) => row;
+// A piece only shows as "finding details" while it's actually being read (not forever if reading was interrupted).
+const isLoading = (it) => it.status === "loading" && (it._reading || Date.now() - new Date(it.created_at).getTime() < 45000);
+
+/* Where you are is kept in the web address, so the back button works. */
+function readHash() {
+  const parts = (typeof window === "undefined" ? "" : window.location.hash).replace(/^#\/?/, "").split("/").map(decodeURIComponent);
+  if (parts[0] === "room" && parts[1]) return { roomId: parts[1], section: parts[2] || null };
+  return { roomId: null, section: null };
+}
+function hashFor(roomId, section) {
+  if (!roomId) return "#/";
+  return `#/room/${encodeURIComponent(roomId)}${section ? "/" + encodeURIComponent(section) : ""}`;
+}
 
 export default function Home({ householdId }) {
   const sb = getSupabase();
@@ -22,16 +34,19 @@ export default function Home({ householdId }) {
   const [rooms, setRooms] = useState([]);
   const [items, setItems] = useState([]);
   const [loaded, setLoaded] = useState(false);
-  const [view, setView] = useState(null);
+  const [place, setPlace] = useState({ roomId: null, section: null });
   const [editingId, setEditingId] = useState(null);
-  const [roomMenu, setRoomMenu] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [sheet, setSheet] = useState(null); // { kind: "addRoom" | "editRoom" | "addSection" | "editSection" | "settings" }
   const [toast, setToast] = useState(null);
+  const [adding, setAdding] = useState(false);
+  const [selecting, setSelecting] = useState(false);
+  const [selected, setSelected] = useState(() => new Set());
+  const [justAdded, setJustAdded] = useState(null);
   const toastTimer = useRef(null);
   const reloadTimer = useRef(null);
-
   const currency = home?.currency || "GBP";
 
+  /* ---------- data ---------- */
   const load = useCallback(async () => {
     const [h, r, i] = await Promise.all([
       sb.from("households").select("*").eq("id", householdId).single(),
@@ -41,11 +56,11 @@ export default function Home({ householdId }) {
     if (h.data) setHome(h.data);
     if (r.data) setRooms(r.data);
     if (i.data) {
-      // Keep items that are still being read on this device.
       setItems((prev) => {
-        const loading = prev.filter((p) => p._local && !i.data.some((d) => d.id === p.id));
-        const map = new Map(prev.map((p) => [p.id, p]));
-        return [...i.data.map((d) => (map.get(d.id)?._reading ? { ...d, ...map.get(d.id) } : d)), ...loading];
+        const reading = new Map(prev.filter((p) => p._reading).map((p) => [p.id, p]));
+        const fresh = i.data.map((d) => reading.get(d.id) || d);
+        const pending = prev.filter((p) => p._local && !i.data.some((d) => d.id === p.id));
+        return [...fresh, ...pending];
       });
     }
     setLoaded(true);
@@ -53,33 +68,28 @@ export default function Home({ householdId }) {
 
   useEffect(() => {
     load();
-    const schedule = () => {
-      clearTimeout(reloadTimer.current);
-      reloadTimer.current = setTimeout(load, 500);
-    };
+    const schedule = () => { clearTimeout(reloadTimer.current); reloadTimer.current = setTimeout(load, 500); };
     const channel = sb
       .channel(`home-${householdId}`)
       .on("postgres_changes", { event: "*", schema: "public", table: "items", filter: `household_id=eq.${householdId}` }, schedule)
       .on("postgres_changes", { event: "*", schema: "public", table: "rooms", filter: `household_id=eq.${householdId}` }, schedule)
       .subscribe();
-    const onFocus = () => schedule();
-    window.addEventListener("focus", onFocus);
-    return () => { sb.removeChannel(channel); window.removeEventListener("focus", onFocus); };
+    window.addEventListener("focus", schedule);
+    return () => { sb.removeChannel(channel); window.removeEventListener("focus", schedule); };
   }, [sb, householdId, load]);
 
-  // Remember the last room viewed.
   useEffect(() => {
-    if (!loaded) return;
-    if (view && (view === "all" || rooms.some((r) => r.id === view))) return;
-    let saved = null;
-    try { saved = localStorage.getItem("ourhome:view"); } catch {}
-    if (saved && (saved === "all" || rooms.some((r) => r.id === saved))) setView(saved);
-    else setView(rooms[0]?.id || "all");
-  }, [loaded, rooms, view]);
+    const sync = () => setPlace(readHash());
+    sync();
+    window.addEventListener("hashchange", sync);
+    return () => window.removeEventListener("hashchange", sync);
+  }, []);
 
-  function go(v) {
-    setView(v);
-    try { localStorage.setItem("ourhome:view", v); } catch {}
+  function go(roomId = null, section = null) {
+    setSelecting(false); setSelected(new Set());
+    const h = hashFor(roomId, section);
+    if (window.location.hash !== h) window.location.hash = h;
+    setPlace({ roomId, section });
     window.scrollTo({ top: 0 });
   }
 
@@ -89,9 +99,18 @@ export default function Home({ householdId }) {
     toastTimer.current = setTimeout(() => setToast(null), undo ? 8000 : 4000);
   }
 
-  const room = rooms.find((r) => r.id === view) || null;
-  const roomItems = useMemo(() => items.filter((i) => i.room_id === view), [items, view]);
+  const room = rooms.find((r) => r.id === place.roomId) || null;
+  const section = room && place.section && (sectionsOf(room).includes(place.section) || items.some((i) => i.room_id === room.id && i.section === place.section)) ? place.section : null;
   const houseItems = useMemo(() => items.filter((i) => rooms.some((r) => r.id === i.room_id)), [items, rooms]);
+  const roomItems = useMemo(() => (room ? items.filter((i) => i.room_id === room.id) : []), [items, room]);
+  const sectionItems = useMemo(() => (section ? roomItems.filter((i) => i.section === section) : []), [roomItems, section]);
+
+  // If the room or section you were in no longer exists, step back up.
+  useEffect(() => {
+    if (!loaded) return;
+    if (place.roomId && !room) go(null);
+    else if (room && place.section && !section) go(room.id);
+  }, [loaded, place, room, section]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /* ---------- items ---------- */
   async function readLink(url) {
@@ -103,20 +122,13 @@ export default function Home({ householdId }) {
         body: JSON.stringify({ url }),
       });
       return r.ok ? await r.json() : null;
-    } catch {
-      return null;
-    }
+    } catch { return null; }
   }
 
-  async function addLinks(urls, targetRoom) {
-    for (const url of urls) addOne(url, targetRoom);
-  }
-
-  async function addOne(url, targetRoom) {
+  async function addOne(url, targetRoom, targetSection) {
     const id = newId();
     const row = {
-      id, household_id: householdId, room_id: targetRoom.id,
-      section: guessSection(url, sectionsOf(targetRoom)),
+      id, household_id: householdId, room_id: targetRoom.id, section: targetSection,
       url, title: titleFromUrl(url) || shopFromUrl(url), shop: shopFromUrl(url),
       image_url: null, price: null, currency: null, qty: 1, included: true, notes: null,
       status: "loading", created_at: new Date().toISOString(),
@@ -130,16 +142,45 @@ export default function Home({ householdId }) {
     }
     const info = await readLink(url);
     const patch = {
-      title: info?.title || row.title,
-      shop: info?.shop || row.shop,
-      image_url: info?.image || null,
-      price: info?.price ?? null,
-      currency: info?.currency || null,
+      title: info?.title || row.title, shop: info?.shop || row.shop,
+      image_url: info?.image || null, price: info?.price ?? null, currency: info?.currency || null,
       status: info ? (info.price != null ? "ready" : "needs_price") : "failed",
     };
-    patch.section = guessSection(`${patch.title} ${url}`, sectionsOf(targetRoom));
     setItems((p) => p.map((x) => (x.id === id ? { ...x, ...patch, _local: false, _reading: false } : x)));
     await sb.from("items").update(patch).eq("id", id);
+  }
+
+  async function addPiece(data) {
+    const id = newId();
+    const row = {
+      id, household_id: householdId, room_id: room.id, section,
+      notes: null, included: true, created_at: new Date().toISOString(), ...data,
+    };
+    setAdding(false);
+    setItems((p) => [...p, row]);
+    setJustAdded(id);
+    setTimeout(() => setJustAdded((j) => (j === id ? null : j)), 2600);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    const { error } = await sb.from("items").insert(row);
+    if (error) { setItems((p) => p.filter((x) => x.id !== id)); showToast("That piece didn't save. Try again."); return; }
+    showToast(`Added to ${section}.`);
+  }
+
+  function toggleSelect(id) {
+    setSelected((prev) => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  }
+
+  async function removeSelected() {
+    const list = items.filter((i) => selected.has(i.id));
+    if (!list.length) return;
+    setSelecting(false); setSelected(new Set());
+    setItems((p) => p.filter((x) => !list.some((l) => l.id === x.id)));
+    const { error } = await sb.from("items").delete().in("id", list.map((i) => i.id));
+    if (error) { showToast("Those pieces didn't delete. Try again."); load(); return; }
+    showToast(`Removed ${list.length} piece${list.length === 1 ? "" : "s"}.`, async () => {
+      setItems((p) => [...p, ...list.map(strip)]);
+      await sb.from("items").insert(list.map(strip));
+    });
   }
 
   async function updateItem(id, patch) {
@@ -148,20 +189,23 @@ export default function Home({ householdId }) {
     if (error) { showToast("That change didn't save. Try again."); load(); }
   }
 
-  async function refreshItem(it) {
-    setItems((p) => p.map((x) => (x.id === it.id ? { ...x, status: "loading", _reading: true } : x)));
-    const info = await readLink(it.url);
+  async function refreshItem(it, newUrl) {
+    const url = newUrl || it.url;
+    const linkChanged = url !== it.url;
+    setItems((p) => p.map((x) => (x.id === it.id ? { ...x, url, status: "loading", _reading: true } : x)));
+    const info = await readLink(url);
+    // A new link replaces everything; a refresh keeps what it can't find again.
+    const keep = linkChanged ? { title: titleFromUrl(url) || shopFromUrl(url), shop: shopFromUrl(url), image_url: null, price: null, currency: null } : it;
     const patch = info
       ? {
-          title: info.title || it.title, shop: info.shop || it.shop,
-          image_url: info.image || it.image_url,
-          price: info.price ?? it.price, currency: info.currency || it.currency,
-          status: (info.price ?? it.price) != null ? "ready" : "needs_price",
+          url, title: info.title || keep.title, shop: info.shop || keep.shop, image_url: info.image || keep.image_url,
+          price: info.price ?? keep.price, currency: info.currency || keep.currency,
+          status: (info.price ?? keep.price) != null ? "ready" : "needs_price",
         }
-      : { status: it.price != null ? "ready" : "failed" };
+      : { url, ...(linkChanged ? keep : {}), status: keep.price != null ? "ready" : "failed" };
     setItems((p) => p.map((x) => (x.id === it.id ? { ...x, ...patch, _reading: false } : x)));
     await sb.from("items").update(patch).eq("id", it.id);
-    showToast(info ? "Details refreshed." : "Couldn't reach that page just now.");
+    showToast(info ? (linkChanged ? "Link updated." : "Details refreshed.") : "Couldn't read that page. You can add the details by hand.");
   }
 
   async function removeItem(it) {
@@ -169,58 +213,87 @@ export default function Home({ householdId }) {
     setItems((p) => p.filter((x) => x.id !== it.id));
     const { error } = await sb.from("items").delete().eq("id", it.id);
     if (error) { showToast("That didn't delete. Try again."); load(); return; }
-    showToast(`Removed ${it.title || "item"}.`, async () => {
-      const { _local, _reading, ...row } = it;
-      setItems((p) => [...p, row]);
-      await sb.from("items").insert(row);
+    showToast(`Removed ${it.title || "piece"}.`, async () => {
+      setItems((p) => [...p, strip(it)]);
+      await sb.from("items").insert(strip(it));
     });
   }
 
   /* ---------- rooms ---------- */
   async function addRoom(name) {
-    const clean = name.trim();
-    if (!clean) return;
-    const row = { id: newId(), household_id: householdId, name: clean, position: rooms.length, sections: DEFAULT_SECTIONS };
+    const row = { id: newId(), household_id: householdId, name, position: rooms.length, sections: [] };
     setRooms((p) => [...p, { ...row, created_at: new Date().toISOString() }]);
+    setSheet(null);
     go(row.id);
     const { error } = await sb.from("rooms").insert(row);
     if (error) { showToast("That room didn't save. Try again."); load(); }
   }
 
   async function renameRoom(r, name) {
-    const clean = name.trim();
-    if (!clean || clean === r.name) return;
-    setRooms((p) => p.map((x) => (x.id === r.id ? { ...x, name: clean } : x)));
-    await sb.from("rooms").update({ name: clean }).eq("id", r.id);
+    setSheet(null);
+    if (name === r.name) return;
+    setRooms((p) => p.map((x) => (x.id === r.id ? { ...x, name } : x)));
+    await sb.from("rooms").update({ name }).eq("id", r.id);
   }
 
   async function removeRoom(r) {
     const saved = items.filter((i) => i.room_id === r.id);
-    setRoomMenu(false);
+    setSheet(null);
     setRooms((p) => p.filter((x) => x.id !== r.id));
     setItems((p) => p.filter((x) => x.room_id !== r.id));
-    const rest = rooms.filter((x) => x.id !== r.id);
-    go(rest[0]?.id || "all");
+    go(null);
     const { error } = await sb.from("rooms").delete().eq("id", r.id);
     if (error) { showToast("That room didn't delete. Try again."); load(); return; }
-    showToast(`Removed ${r.name}${saved.length ? ` and its ${saved.length} item${saved.length === 1 ? "" : "s"}` : ""}.`, async () => {
+    showToast(`Removed ${r.name}${saved.length ? ` and ${saved.length} piece${saved.length === 1 ? "" : "s"}` : ""}.`, async () => {
       const { error: e1 } = await sb.from("rooms").insert({ id: r.id, household_id: r.household_id, name: r.name, sections: r.sections, position: r.position, created_at: r.created_at });
-      if (!e1 && saved.length) await sb.from("items").insert(saved.map(({ _local, _reading, ...row }) => row));
+      if (!e1 && saved.length) await sb.from("items").insert(saved.map(strip));
       await load();
-      go(r.id);
     });
   }
 
+  /* ---------- sections ---------- */
   async function addSection(r, name) {
-    const clean = name.trim();
-    if (!clean) return null;
+    setSheet(null);
     const secs = sectionsOf(r);
-    const existing = secs.find((s) => s.toLowerCase() === clean.toLowerCase());
-    if (existing) return existing;
-    const next = [...secs, clean];
+    const existing = secs.find((s) => s.toLowerCase() === name.toLowerCase());
+    if (existing) { go(r.id, existing); return; }
+    const next = [...secs, name];
     setRooms((p) => p.map((x) => (x.id === r.id ? { ...x, sections: next } : x)));
+    go(r.id, name);
+    const { error } = await sb.from("rooms").update({ sections: next }).eq("id", r.id);
+    if (error) { showToast("That section didn't save. Try again."); load(); }
+  }
+
+  async function renameSection(r, oldName, name) {
+    setSheet(null);
+    if (name === oldName) return;
+    if (sectionsOf(r).some((s) => s !== oldName && s.toLowerCase() === name.toLowerCase())) {
+      showToast(`${r.name} already has a section called ${name}.`);
+      return;
+    }
+    const next = sectionsOf(r).map((s) => (s === oldName ? name : s));
+    setRooms((p) => p.map((x) => (x.id === r.id ? { ...x, sections: next } : x)));
+    setItems((p) => p.map((x) => (x.room_id === r.id && x.section === oldName ? { ...x, section: name } : x)));
+    go(r.id, name);
     await sb.from("rooms").update({ sections: next }).eq("id", r.id);
-    return clean;
+    await sb.from("items").update({ section: name }).eq("room_id", r.id).eq("section", oldName);
+  }
+
+  async function removeSection(r, name) {
+    const saved = items.filter((i) => i.room_id === r.id && i.section === name);
+    const before = sectionsOf(r);
+    const next = before.filter((s) => s !== name);
+    setSheet(null);
+    setRooms((p) => p.map((x) => (x.id === r.id ? { ...x, sections: next } : x)));
+    setItems((p) => p.filter((x) => !(x.room_id === r.id && x.section === name)));
+    go(r.id);
+    await sb.from("rooms").update({ sections: next }).eq("id", r.id);
+    if (saved.length) await sb.from("items").delete().eq("room_id", r.id).eq("section", name);
+    showToast(`Removed ${name}${saved.length ? ` and ${saved.length} piece${saved.length === 1 ? "" : "s"}` : ""}.`, async () => {
+      await sb.from("rooms").update({ sections: before }).eq("id", r.id);
+      if (saved.length) await sb.from("items").insert(saved.map(strip));
+      await load();
+    });
   }
 
   async function saveHome(patch) {
@@ -230,198 +303,404 @@ export default function Home({ householdId }) {
 
   const editing = items.find((i) => i.id === editingId) || null;
   const house = totals(houseItems);
+  const roomT = totals(roomItems);
 
   return (
     <>
       <header className="top">
-        <div className="brand">{home?.name || "Our home"}</div>
-        <button className="btn ghost" onClick={() => setSettingsOpen(true)}>Settings</button>
+        <button className="brand" onClick={() => go(null)}>{home?.name || "Our home"}</button>
+        <button className="btn ghost" onClick={() => setSheet({ kind: "settings" })}>Settings</button>
       </header>
 
-      <nav className="tabs" aria-label="Rooms">
-        <div className="tabs-inner">
-          {rooms.length > 1 && (
-            <button className="tab" aria-current={view === "all"} onClick={() => go("all")}>Whole house</button>
-          )}
-          {rooms.map((r) => (
-            <button key={r.id} className="tab" aria-current={view === r.id} onClick={() => go(r.id)}>{r.name}</button>
-          ))}
-          <AddRoom onAdd={addRoom} />
-        </div>
-      </nav>
+      {room && (
+        <nav className="crumbs" aria-label="You are here">
+          <button onClick={() => go(null)}>{home?.name || "Our home"}</button>
+          <span aria-hidden="true">/</span>
+          {section ? <button onClick={() => go(room.id)}>{room.name}</button> : <span className="here">{room.name}</span>}
+          {section && <><span aria-hidden="true">/</span><span className="here">{section}</span></>}
+        </nav>
+      )}
 
       <main className="page">
         {!loaded ? (
           <p className="quiet">Opening your home…</p>
-        ) : view === "all" || !room ? (
-          <Overview rooms={rooms} items={houseItems} currency={currency} onOpen={go} onAddRoom={addRoom} />
-        ) : (
+        ) : !room ? (
+          <HouseView
+            home={home} rooms={rooms} items={houseItems} currency={currency}
+            onOpen={(id) => go(id)} onAddRoom={() => setSheet({ kind: "addRoom" })}
+          />
+        ) : !section ? (
           <RoomView
-            room={room}
-            items={roomItems}
-            currency={currency}
-            onAdd={(urls) => addLinks(urls, room)}
+            room={room} items={roomItems} currency={currency}
+            onOpen={(s) => go(room.id, s)}
+            onAddSection={() => setSheet({ kind: "addSection" })}
+            onEditRoom={() => setSheet({ kind: "editRoom" })}
+          />
+        ) : (
+          <SectionView
+            room={room} section={section} items={sectionItems} currency={currency}
+            selecting={selecting} selected={selected} justAdded={justAdded}
+            onStartAdd={() => setAdding(true)}
+            onStartSelect={() => { setSelecting(true); setSelected(new Set()); }}
+            onSelect={toggleSelect}
             onEdit={setEditingId}
             onToggle={(it) => updateItem(it.id, { included: !(it.included !== false) })}
-            onRoomMenu={() => setRoomMenu(true)}
+            onRemove={removeItem}
+            onEditSection={() => setSheet({ kind: "editSection" })}
           />
         )}
       </main>
 
+      {selecting ? (
+        <footer className="tally select-bar" aria-live="polite">
+          <span className="select-count">{selected.size ? `${selected.size} selected` : "Tap pieces to select them"}</span>
+          <button className="btn ghost" onClick={() => setSelected(selected.size === sectionItems.length ? new Set() : new Set(sectionItems.map((i) => i.id)))}>
+            {selected.size === sectionItems.length && sectionItems.length ? "Clear" : "Select all"}
+          </button>
+          <span className="select-spacer" />
+          <button className="btn" onClick={() => { setSelecting(false); setSelected(new Set()); }}>Cancel</button>
+          <button className="btn primary danger-fill" disabled={!selected.size} onClick={removeSelected}>Delete{selected.size ? ` ${selected.size}` : ""}</button>
+        </footer>
+      ) : (
       <footer className="tally" aria-live="polite">
-        <div className="tally-main">
-          <span className="tally-label">Your home</span>
+        <div className="tally-block">
+          <span className="tally-label">Whole house</span>
           <span className="tally-big">{money(house.included, currency)}</span>
         </div>
-        <div className="tally-side">
-          {house.count
-            ? <>{house.includedCount} of {house.count} pieces<br /><span>{money(house.all, currency)} if you bought everything</span></>
-            : "Paste a link to get started"}
-        </div>
-        {room && view !== "all" && (
-          <div className="tally-room">
+        {room ? (
+          <div className="tally-block tally-room">
             <span className="tally-label">{room.name}</span>
-            <span className="tally-mid">{money(totals(roomItems).included, currency)}</span>
+            <span className="tally-mid">{money(roomT.included, currency)}</span>
+          </div>
+        ) : (
+          <div className="tally-side">
+            {house.count
+              ? <>{house.includedCount} of {house.count} pieces included<br /><span>{money(house.all, currency)} if you bought everything</span></>
+              : "Totals appear as you add pieces"}
           </div>
         )}
       </footer>
+      )}
+
+      {adding && room && section && (
+        <AddSheet where={section} currency={currency} readLink={readLink}
+          onClose={() => setAdding(false)} onAdd={addPiece}
+          onAddMany={(urls) => { setAdding(false); urls.forEach((u) => addOne(u, room, section)); showToast(`Adding ${urls.length} pieces…`); }} />
+      )}
 
       {editing && (
         <EditSheet
-          key={editing.id}
-          item={editing}
-          rooms={rooms}
-          currency={currency}
+          key={editing.id} item={editing} rooms={rooms} currency={currency}
           onClose={() => setEditingId(null)}
-          onSave={(patch) => { updateItem(editing.id, patch); setEditingId(null); }}
+          onSave={(patch, newUrl) => {
+            const it = editing;
+            setEditingId(null);
+            updateItem(it.id, patch).then(() => { if (newUrl) refreshItem({ ...it, ...patch }, newUrl); });
+          }}
           onRefresh={() => refreshItem(editing)}
           onRemove={() => removeItem(editing)}
-          onAddSection={addSection}
         />
       )}
 
-      {roomMenu && room && (
-        <RoomSheet room={room} count={roomItems.length} onClose={() => setRoomMenu(false)}
-          onRename={(n) => { renameRoom(room, n); setRoomMenu(false); }}
+      {sheet?.kind === "addRoom" && (
+        <NameSheet title="Add a room" label="Room name" placeholder="e.g. Living room" action="Add room"
+          onClose={() => setSheet(null)} onSave={addRoom} />
+      )}
+      {sheet?.kind === "editRoom" && room && (
+        <NameSheet title="Edit room" label="Room name" initial={room.name} action="Save"
+          onClose={() => setSheet(null)} onSave={(n) => renameRoom(room, n)}
+          removeLabel={`Remove room${roomItems.length ? ` and ${roomItems.length} piece${roomItems.length === 1 ? "" : "s"}` : ""}`}
           onRemove={() => removeRoom(room)} />
       )}
-
-      {settingsOpen && home && (
-        <SettingsSheet home={home} onClose={() => setSettingsOpen(false)} onSave={saveHome}
+      {sheet?.kind === "addSection" && room && (
+        <NameSheet title={`Add a section to ${room.name}`} label="Section name" placeholder="e.g. Storage" action="Add section"
+          suggestions={["Furniture", "Appliances", "Storage", "Decor", "Lighting", "Textiles"].filter((s) => !sectionsOf(room).includes(s))}
+          onClose={() => setSheet(null)} onSave={(n) => addSection(room, n)} />
+      )}
+      {sheet?.kind === "editSection" && room && section && (
+        <NameSheet title="Edit section" label="Section name" initial={section} action="Save"
+          onClose={() => setSheet(null)} onSave={(n) => renameSection(room, section, n)}
+          removeLabel={`Remove section${sectionItems.length ? ` and ${sectionItems.length} piece${sectionItems.length === 1 ? "" : "s"}` : ""}`}
+          onRemove={() => removeSection(room, section)} />
+      )}
+      {sheet?.kind === "settings" && home && (
+        <SettingsSheet home={home} onClose={() => setSheet(null)} onSave={saveHome}
           onSignOut={() => sb.auth.signOut()} onCopied={() => showToast("Invite code copied.")} />
       )}
 
       {toast && (
         <div className="toast" key={toast.key} role="status">
           <span>{toast.message}</span>
-          {toast.undo && (
-            <button onClick={() => { const u = toast.undo; setToast(null); u(); }}>Undo</button>
-          )}
+          {toast.undo && <button onClick={() => { const u = toast.undo; setToast(null); u(); }}>Undo</button>}
         </div>
       )}
+    </>
+  );
+}
+
+/* ---------- views ---------- */
+
+function HouseView({ home, rooms, items, currency, onOpen, onAddRoom }) {
+  const t = totals(items);
+  if (!rooms.length) {
+    return (
+      <div className="empty">
+        <h1 className="room-title">Begin with a room.</h1>
+        <p className="empty-note">Add the first room you&rsquo;re furnishing. Inside it, you&rsquo;ll create sections like Storage or Decor and paste in links to everything you love.</p>
+        <button className="btn primary" onClick={onAddRoom}>Add a room</button>
+      </div>
+    );
+  }
+  const max = Math.max(1, ...rooms.map((r) => totals(items.filter((i) => i.room_id === r.id)).included));
+  return (
+    <>
+      <div className="room-head">
+        <div>
+          <h1 className="room-title">{home?.name || "Our home"}</h1>
+          <p className="room-sub">{t.count ? `${money(t.included, currency)} across ${rooms.length} room${rooms.length === 1 ? "" : "s"}` : `${rooms.length} room${rooms.length === 1 ? "" : "s"}`}</p>
+        </div>
+      </div>
+      <div className="ov">
+        {rooms.map((r) => {
+          const rt = totals(items.filter((i) => i.room_id === r.id));
+          const secCount = r.sections?.length || 0;
+          return (
+            <button key={r.id} className="ov-row" onClick={() => onOpen(r.id)}>
+              <span className="ov-name">{r.name}<small>{secCount} section{secCount === 1 ? "" : "s"} · {rt.count} piece{rt.count === 1 ? "" : "s"}</small></span>
+              <span className="ov-bar"><span style={{ width: `${(rt.included / max) * 100}%` }} /></span>
+              <span className="ov-val">{money(rt.included, currency)}</span>
+            </button>
+          );
+        })}
+        <button className="ov-row add" onClick={onAddRoom}><span className="ov-name">+ Add a room</span></button>
+      </div>
+    </>
+  );
+}
+
+function RoomView({ room, items, currency, onOpen, onAddSection, onEditRoom }) {
+  const t = totals(items);
+  const names = [...sectionsOf(room), ...new Set(items.map((i) => i.section).filter((s) => !sectionsOf(room).includes(s)))];
+  return (
+    <>
+      <div className="room-head">
+        <div>
+          <h1 className="room-title">{room.name}</h1>
+          <p className="room-sub">{t.count ? `${money(t.included, currency)} across ${t.includedCount} of ${t.count} piece${t.count === 1 ? "" : "s"}` : "No pieces yet"}</p>
+        </div>
+        <button className="btn" onClick={onEditRoom}>Edit room</button>
+      </div>
+      {!names.length && (
+        <p className="empty-note">Add a section to start, for example Furniture, Storage or Decor. Then open it and paste in your links.</p>
+      )}
+      <div className="tiles">
+        {names.map((s) => {
+          const list = items.filter((i) => i.section === s);
+          const st = totals(list);
+          const pics = list.filter((i) => i.image_url).slice(0, 4);
+          return (
+            <button key={s} className="tile" onClick={() => onOpen(s)}>
+              <span className={`collage n${pics.length}`}>
+                {pics.map((p) => (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img key={p.id} src={p.image_url} alt="" loading="lazy" referrerPolicy="no-referrer" onError={(e) => { e.currentTarget.style.display = "none"; }} />
+                ))}
+                {!pics.length && <span className="collage-blank">{s.charAt(0).toUpperCase()}</span>}
+              </span>
+              <span className="tile-name">{s}</span>
+              <span className="tile-meta">{list.length ? `${money(st.included, currency)} · ${list.length} piece${list.length === 1 ? "" : "s"}` : "Empty"}</span>
+            </button>
+          );
+        })}
+        <button className="tile add" onClick={onAddSection}>
+          <span className="collage add-box"><span>+</span></span>
+          <span className="tile-name">Add a section</span>
+          <span className="tile-meta">e.g. Storage, Decor</span>
+        </button>
+      </div>
+    </>
+  );
+}
+
+function SectionView({ room, section, items, currency, selecting, selected, justAdded, onStartAdd, onEdit, onToggle, onRemove, onEditSection, onStartSelect, onSelect }) {
+  const t = totals(items);
+  const sorted = [...items].sort((x, y) => new Date(y.created_at) - new Date(x.created_at));
+  return (
+    <>
+      <div className="room-head">
+        <div>
+          <h1 className="room-title">{section}</h1>
+          <p className="room-sub">{t.count ? `${money(t.included, currency)} across ${t.includedCount} of ${t.count} piece${t.count === 1 ? "" : "s"}` : `In ${room.name}`}</p>
+        </div>
+        <div className="head-actions">
+          {items.length > 0 && !selecting && <button className="btn" onClick={onStartSelect}>Select</button>}
+          <button className="btn" onClick={onEditSection}>Edit section</button>
+        </div>
+      </div>
+      {!selecting && (
+        <button className="add-bar" onClick={onStartAdd}>
+          <span className="add-plus" aria-hidden="true">+</span>
+          <span>Add a piece</span>
+          <small>Paste a product link</small>
+        </button>
+      )}
+      {!items.length && <p className="empty-note">Tap Add a piece, paste a link from any shop, and you&rsquo;ll see the photo, name and price before you save it.</p>}
+      <div className="grid">
+        {sorted.map((it) => (
+          <Card key={it.id} item={it} currency={currency} fresh={justAdded === it.id}
+            selecting={selecting} selected={selected.has(it.id)} onSelect={() => onSelect(it.id)}
+            onEdit={() => onEdit(it.id)} onToggle={() => onToggle(it)} onRemove={() => onRemove(it)} />
+        ))}
+      </div>
     </>
   );
 }
 
 /* ---------- pieces ---------- */
 
-function AddRoom({ onAdd }) {
-  const [open, setOpen] = useState(false);
-  const [name, setName] = useState("");
-  if (!open) return <button className="tab add" onClick={() => setOpen(true)}>+ Room</button>;
-  return (
-    <form className="tab-form" onSubmit={(e) => { e.preventDefault(); onAdd(name); setName(""); setOpen(false); }}>
-      <input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="Room name"
-        onBlur={() => { if (!name.trim()) setOpen(false); }} maxLength={40} aria-label="New room name" />
-    </form>
-  );
-}
+function AddSheet({ where, currency, readLink, onClose, onAdd, onAddMany }) {
+  const [step, setStep] = useState("link");
+  const [link, setLink] = useState("");
+  const [error, setError] = useState("");
+  const [many, setMany] = useState([]);
+  const [readUrl, setReadUrl] = useState(null);
+  const [reading, setReading] = useState(false);
+  const [readFailed, setReadFailed] = useState(false);
+  const [imgFailed, setImgFailed] = useState(false);
+  const [showPhoto, setShowPhoto] = useState(false);
+  const [f, setF] = useState({ title: "", shop: "", price: "", qty: 1, image: "", currency: null });
+  const req = useRef(0);
 
-function PasteBar({ roomName, onAdd }) {
-  const [value, setValue] = useState("");
-  const [hint, setHint] = useState("");
-
-  function submit(text) {
-    const urls = findUrls(text);
-    if (!urls.length) { setHint("That doesn't look like a link. Copy the web address from the shop's page."); return; }
-    onAdd(urls);
-    setValue(""); setHint(urls.length > 1 ? `Adding ${urls.length} pieces…` : "");
-    if (urls.length > 1) setTimeout(() => setHint(""), 3000);
+  async function read(raw) {
+    const urls = findUrls(raw);
+    if (!urls.length) { setError("That doesn't look like a link. Copy the web address from the shop's product page."); return; }
+    if (urls.length > 1) { setMany(urls); setError(""); return; }
+    const url = urls[0];
+    const id = ++req.current;
+    setLink(url); setReadUrl(url); setError(""); setMany([]); setStep("review");
+    setReading(true); setReadFailed(false); setImgFailed(false);
+    const info = await readLink(url);
+    if (id !== req.current) return;
+    setReading(false);
+    setF({
+      title: info?.title || titleFromUrl(url) || shopFromUrl(url),
+      shop: info?.shop || shopFromUrl(url),
+      price: info?.price ?? "",
+      qty: 1,
+      image: info?.image || "",
+      currency: info?.currency || null,
+    });
+    if (!info || (!info.image && info.price == null)) setReadFailed(true);
   }
 
-  return (
-    <form className="paste" onSubmit={(e) => { e.preventDefault(); submit(value); }}>
-      <input
-        value={value}
-        onChange={(e) => { setValue(e.target.value); setHint(""); }}
-        onPaste={(e) => {
-          const text = e.clipboardData.getData("text");
-          if (findUrls(text).length) { e.preventDefault(); submit(text); }
-        }}
-        placeholder={`Paste a link to add to ${roomName}`}
-        inputMode="url" autoComplete="off" aria-label={`Paste a product link for ${roomName}`}
-      />
-      <button className="btn primary">Add</button>
-      {hint && <p className="paste-hint">{hint}</p>}
-    </form>
-  );
-}
+  const cleanLink = normalizeUrl(link);
+  const linkChanged = step === "review" && cleanLink && cleanLink !== readUrl;
 
-function RoomView({ room, items, currency, onAdd, onEdit, onToggle, onRoomMenu }) {
-  const t = totals(items);
-  const sections = sectionsOf(room);
-  const groups = [...sections, ...new Set(items.map((i) => i.section).filter((s) => !sections.includes(s)))]
-    .map((s) => ({ name: s, items: items.filter((i) => i.section === s) }))
-    .filter((g) => g.items.length);
+  function submit(e) {
+    e.preventDefault();
+    if (step === "link" || linkChanged) { read(link); return; }
+    if (reading) return;
+    const price = f.price === "" ? null : Math.max(0, Number(f.price));
+    onAdd({
+      url: readUrl,
+      title: f.title.trim() || titleFromUrl(readUrl) || shopFromUrl(readUrl),
+      shop: f.shop, image_url: f.image.trim() ? normalizeUrl(f.image) : null,
+      price, currency: f.currency, qty: Math.max(1, parseInt(f.qty, 10) || 1),
+      status: price != null ? "ready" : "needs_price",
+    });
+  }
+
+  const set = (k) => (e) => setF((p) => ({ ...p, [k]: e.target.value }));
 
   return (
-    <>
-      <div className="room-head">
-        <div>
-          <h1 className="room-title">{room.name}</h1>
-          <p className="room-sub">
-            {t.count ? `${money(t.included, currency)} across ${t.includedCount} of ${t.count} piece${t.count === 1 ? "" : "s"}` : "Nothing added yet"}
-          </p>
+    <Sheet title={`Add to ${where}`} onClose={onClose}>
+      <form className="form" onSubmit={submit}>
+        <label className="field"><span>Product link</span>
+          <input
+            type="url" inputMode="url" autoFocus={step === "link"} value={link}
+            placeholder="Paste the link from the shop's page"
+            onChange={(e) => { setLink(e.target.value); setError(""); setMany([]); }}
+            onPaste={(e) => { const t = e.clipboardData.getData("text"); if (findUrls(t).length) { e.preventDefault(); setLink(t.trim()); read(t); } }}
+          />
+          {error && <small className="field-hint error">{error}</small>}
+          {linkChanged && <small className="field-hint">You&rsquo;ve changed the link. Press &ldquo;Find product&rdquo; to read it.</small>}
+        </label>
+
+        {many.length > 0 && (
+          <div className="many">
+            <p className="note">That&rsquo;s {many.length} links. Add them all at once? Each piece&rsquo;s photo and price will fill in after it&rsquo;s added.</p>
+            <button type="button" className="btn primary" onClick={() => onAddMany(many)}>Add all {many.length}</button>
+          </div>
+        )}
+
+        {step === "review" && (
+          <>
+            <div className="preview">
+              <div className={`preview-img${reading ? " loading" : ""}`}>
+                {!reading && f.image && !imgFailed
+                  // eslint-disable-next-line @next/next/no-img-element
+                  ? <img src={f.image} alt="" referrerPolicy="no-referrer" onError={() => setImgFailed(true)} />
+                  : !reading && <span>{(f.title || "?").charAt(0).toUpperCase()}</span>}
+              </div>
+              <div className="preview-text">
+                {reading ? (
+                  <p className="preview-status">Finding the photo, name and price…</p>
+                ) : (
+                  <>
+                    <p className="card-shop">{f.shop}</p>
+                    <p className="preview-title">{f.title || "Untitled"}</p>
+                    <p className="preview-price">{f.price !== "" ? money(f.price, f.currency || currency) : "No price found"}</p>
+                    <button type="button" className="link" onClick={() => setShowPhoto((v) => !v)}>{showPhoto ? "Hide photo link" : "Wrong photo?"}</button>
+                  </>
+                )}
+              </div>
+            </div>
+            {!reading && readFailed && <p className="note">This shop didn&rsquo;t share all its details. Fill in anything missing below.</p>}
+            {!reading && (
+              <>
+                {showPhoto && (
+                  <label className="field"><span>Photo link</span>
+                    <input type="url" inputMode="url" value={f.image} onChange={(e) => { set("image")(e); setImgFailed(false); }} placeholder="Paste an image address" />
+                    <small className="field-hint">On the shop&rsquo;s page, right-click (or press and hold) the product photo, choose &ldquo;Copy image address&rdquo; and paste it here.</small>
+                  </label>
+                )}
+                <label className="field"><span>Name</span><input value={f.title} onChange={set("title")} /></label>
+                <div className="row">
+                  <label className="field"><span>Price each ({f.currency || currency})</span>
+                    <input type="number" inputMode="decimal" min="0" step="0.01" value={f.price} onChange={set("price")} placeholder="0" />
+                  </label>
+                  <label className="field"><span>Quantity</span><input type="number" min="1" step="1" value={f.qty} onChange={set("qty")} /></label>
+                </div>
+              </>
+            )}
+          </>
+        )}
+
+        <div className="sheet-foot">
+          <button type="button" className="btn ghost" onClick={onClose}>Cancel</button>
+          {step === "link" || linkChanged
+            ? <button className="btn primary" disabled={!link.trim()}>Find product</button>
+            : <button className="btn primary" disabled={reading}>{reading ? "Reading…" : "Add piece"}</button>}
         </div>
-        <button className="btn ghost" onClick={onRoomMenu}>Room options</button>
-      </div>
-
-      <PasteBar roomName={room.name} onAdd={onAdd} />
-
-      {!groups.length && (
-        <p className="empty-note">Copy a product link from any shop, paste it above, and the photo and price will appear here. Pieces are sorted into furniture, appliances, storage and decor for you.</p>
-      )}
-
-      {groups.map((g) => {
-        const st = totals(g.items);
-        return (
-          <section className="section" key={g.name}>
-            <div className="sec-head">
-              <h2>{g.name}</h2>
-              <span className="sec-meta">{money(st.included, currency)}</span>
-            </div>
-            <div className="grid">
-              {g.items.map((it) => (
-                <Card key={it.id} item={it} currency={currency} onEdit={() => onEdit(it.id)} onToggle={() => onToggle(it)} />
-              ))}
-            </div>
-          </section>
-        );
-      })}
-    </>
+      </form>
+    </Sheet>
   );
 }
 
-function Card({ item, currency, onEdit, onToggle }) {
+function Card({ item, currency, fresh, selecting, selected, onSelect, onEdit, onToggle, onRemove }) {
   const [imgFailed, setImgFailed] = useState(false);
   const included = item.included !== false;
-  const loading = item.status === "loading";
+  const loading = isLoading(item);
   const q = Math.max(1, Number(item.qty) || 1);
   const hasPrice = item.price != null && Number(item.price) > 0;
   const cur = item.currency || currency;
-
   return (
-    <article className={`card${included ? "" : " off"}${loading ? " loading" : ""}`}>
+    <article className={`card${included ? "" : " off"}${loading ? " loading" : ""}${fresh ? " fresh" : ""}${selecting ? " selecting" : ""}${selected ? " selected" : ""}`}>
+      {selecting && (
+        <button className="select-cover" onClick={onSelect} aria-pressed={selected} aria-label={`${selected ? "Deselect" : "Select"} ${item.title}`}>
+          <span className="select-dot"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.5l3 3 6-7" fill="none" stroke="currentColor" strokeWidth="1.6" /></svg></span>
+        </button>
+      )}
       <div className="card-img">
         <a href={item.url} target="_blank" rel="noopener noreferrer" aria-label={`Open ${item.title} in the shop`}>
           {item.image_url && !imgFailed ? (
@@ -434,59 +713,27 @@ function Card({ item, currency, onEdit, onToggle }) {
             </div>
           )}
         </a>
-        {!loading && (
-          <button className={`check${included ? " on" : ""}`} onClick={onToggle}
-            aria-pressed={included} aria-label={included ? "Included in total. Tap to set aside" : "Set aside. Tap to include"}>
+        {!loading && !selecting && (
+          <button className={`check${included ? " on" : ""}`} onClick={onToggle} aria-pressed={included}
+            aria-label={included ? "Included in total. Tap to set aside" : "Set aside. Tap to include"}>
             <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.5l3 3 6-7" fill="none" stroke="currentColor" strokeWidth="1.6" /></svg>
           </button>
         )}
       </div>
-      <button className="card-body" onClick={onEdit} disabled={loading}>
+      <button className="card-body" onClick={onEdit}>
         <span className="card-shop">{item.shop}</span>
         <span className="card-title">{item.title || "Untitled"}</span>
         <span className={`card-price${hasPrice ? "" : " none"}`}>
-          {loading ? "\u00a0" : hasPrice ? (
-            <>{money(lineTotal(item), cur)}{q > 1 && <small> {q} × {money(item.price, cur)}</small>}</>
-          ) : "Add price"}
+          {loading ? "\u00a0" : hasPrice ? <>{money(lineTotal(item), cur)}{q > 1 && <small> {q} × {money(item.price, cur)}</small>}</> : "Add price"}
         </span>
       </button>
-    </article>
-  );
-}
-
-function Overview({ rooms, items, currency, onOpen, onAddRoom }) {
-  const t = totals(items);
-  const max = Math.max(1, ...rooms.map((r) => totals(items.filter((i) => i.room_id === r.id)).included));
-  if (!rooms.length) {
-    return (
-      <div className="empty">
-        <h1 className="room-title">Begin with a room.</h1>
-        <p className="empty-note">Add a room above, then paste links to the things you love.</p>
-        <button className="btn primary" onClick={() => onAddRoom("Living room")}>Add a living room</button>
-      </div>
-    );
-  }
-  return (
-    <>
-      <div className="room-head">
-        <div>
-          <h1 className="room-title">Whole house</h1>
-          <p className="room-sub">{t.count ? `${money(t.included, currency)} across ${rooms.length} rooms` : "Your rooms and their totals will appear here"}</p>
+      {!selecting && (
+        <div className="card-actions">
+          <button onClick={onEdit}>Edit</button>
+          <button onClick={onRemove}>Remove</button>
         </div>
-      </div>
-      <div className="ov">
-        {rooms.map((r) => {
-          const rt = totals(items.filter((i) => i.room_id === r.id));
-          return (
-            <button key={r.id} className="ov-row" onClick={() => onOpen(r.id)}>
-              <span className="ov-name">{r.name}</span>
-              <span className="ov-bar"><span style={{ width: `${(rt.included / max) * 100}%` }} /></span>
-              <span className="ov-val">{money(rt.included, currency)}<small>{rt.count} piece{rt.count === 1 ? "" : "s"}</small></span>
-            </button>
-          );
-        })}
-      </div>
-    </>
+      )}
+    </article>
   );
 }
 
@@ -512,29 +759,58 @@ function Sheet({ title, onClose, children }) {
   );
 }
 
-function EditSheet({ item, rooms, currency, onClose, onSave, onRefresh, onRemove, onAddSection }) {
+function NameSheet({ title, label, initial = "", placeholder, action, suggestions, onClose, onSave, removeLabel, onRemove }) {
+  const [name, setName] = useState(initial);
+  const submit = (n) => { const clean = (n ?? name).trim(); if (clean) onSave(clean.slice(0, 40)); };
+  return (
+    <Sheet title={title} onClose={onClose}>
+      <form className="form" onSubmit={(e) => { e.preventDefault(); submit(); }}>
+        <label className="field"><span>{label}</span>
+          <input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder={placeholder} maxLength={40} />
+        </label>
+        {suggestions?.length > 0 && (
+          <div className="chips">
+            {suggestions.map((s) => <button type="button" key={s} className="chip" onClick={() => submit(s)}>{s}</button>)}
+          </div>
+        )}
+        <div className="sheet-foot">
+          {onRemove ? <button type="button" className="btn ghost danger" onClick={onRemove}>{removeLabel}</button> : <span />}
+          <button className="btn primary" disabled={!name.trim()}>{action}</button>
+        </div>
+      </form>
+    </Sheet>
+  );
+}
+
+function EditSheet({ item, rooms, currency, onClose, onSave, onRefresh, onRemove }) {
+  const [link, setLink] = useState(item.url);
+  const [photo, setPhoto] = useState(item.image_url || "");
+  const [linkError, setLinkError] = useState("");
+  const movable = rooms.filter((r) => sectionsOf(r).length || r.id === item.room_id);
   const [f, setF] = useState({
     title: item.title || "", price: item.price ?? "", qty: item.qty || 1, room_id: item.room_id,
     section: item.section, notes: item.notes || "", included: item.included !== false,
   });
-  const [newSec, setNewSec] = useState(null);
   const room = rooms.find((r) => r.id === f.room_id);
-  const secs = sectionsOf(room);
+  const secs = [...new Set([...sectionsOf(room), ...(f.room_id === item.room_id ? [item.section] : [])])];
   const set = (k) => (e) => setF((p) => ({ ...p, [k]: e.target.type === "checkbox" ? e.target.checked : e.target.value }));
-  const loading = item.status === "loading";
+  const loading = isLoading(item);
 
-  async function save(e) {
+  function save(e) {
     e.preventDefault();
-    let section = f.section;
-    if (newSec !== null && newSec.trim()) section = (await onAddSection(room, newSec)) || section;
-    if (!sectionsOf(room).includes(section) && newSec === null) section = guessSection(f.title, sectionsOf(room));
+    const cleanLink = normalizeUrl(link);
+    if (!cleanLink) { setLinkError("Enter the full web address, starting with https://"); return; }
+    const newUrl = cleanLink !== item.url ? cleanLink : null;
+    const cleanPhoto = photo.trim() ? normalizeUrl(photo) : null;
     onSave({
+      image_url: cleanPhoto,
       title: f.title.trim() || item.title,
       price: f.price === "" ? null : Math.max(0, Number(f.price)),
       qty: Math.max(1, parseInt(f.qty, 10) || 1),
-      room_id: f.room_id, section, notes: f.notes.trim() || null, included: f.included,
-      status: f.price === "" ? item.status === "failed" ? "failed" : "needs_price" : "ready",
-    });
+      room_id: f.room_id, section: secs.includes(f.section) ? f.section : secs[0],
+      notes: f.notes.trim() || null, included: f.included,
+      status: f.price === "" ? (item.status === "failed" ? "failed" : "needs_price") : "ready",
+    }, newUrl);
   }
 
   return (
@@ -548,59 +824,47 @@ function EditSheet({ item, rooms, currency, onClose, onSave, onRefresh, onRemove
           <div>
             <p className="card-shop">{item.shop}</p>
             <a className="link" href={item.url} target="_blank" rel="noopener noreferrer">Open in shop</a>
-            <button type="button" className="link" onClick={onRefresh} disabled={loading}>
-              {loading ? "Refreshing…" : "Refresh photo and price"}
-            </button>
+            <button type="button" className="link" onClick={onRefresh} disabled={loading}>{loading ? "Refreshing…" : "Refresh photo and price"}</button>
           </div>
         </div>
         {item.status === "failed" && <p className="note">This shop didn&rsquo;t share its details. Add the name and price below.</p>}
+        <label className="field"><span>Product link</span>
+          <input type="url" inputMode="url" value={link} onChange={(e) => { setLink(e.target.value); setLinkError(""); }} />
+          {normalizeUrl(link) && normalizeUrl(link) !== item.url
+            ? <small className="field-hint">When you press Done, the photo, name and price will be read again from this link.</small>
+            : linkError ? <small className="field-hint error">{linkError}</small> : null}
+        </label>
         <label className="field"><span>Name</span><input value={f.title} onChange={set("title")} /></label>
         <div className="row">
-          <label className="field"><span>Price each ({(item.currency || currency)})</span>
+          <label className="field"><span>Price each ({item.currency || currency})</span>
             <input type="number" inputMode="decimal" min="0" step="0.01" value={f.price} onChange={set("price")} placeholder="0" autoFocus={item.price == null} />
           </label>
           <label className="field"><span>Quantity</span><input type="number" min="1" step="1" value={f.qty} onChange={set("qty")} /></label>
         </div>
         <div className="row">
           <label className="field"><span>Room</span>
-            <select value={f.room_id} onChange={(e) => { const r = rooms.find((x) => x.id === e.target.value); setF((p) => ({ ...p, room_id: e.target.value, section: sectionsOf(r).includes(p.section) ? p.section : guessSection(p.title, sectionsOf(r)) })); }}>
-              {rooms.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+            <select value={f.room_id} onChange={(e) => {
+              const r = rooms.find((x) => x.id === e.target.value);
+              setF((p) => ({ ...p, room_id: e.target.value, section: sectionsOf(r).includes(p.section) ? p.section : sectionsOf(r)[0] }));
+            }}>
+              {movable.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
             </select>
           </label>
           <label className="field"><span>Section</span>
-            {newSec === null ? (
-              <select value={secs.includes(f.section) ? f.section : ""} onChange={(e) => e.target.value === "__new" ? setNewSec("") : setF((p) => ({ ...p, section: e.target.value }))}>
-                {!secs.includes(f.section) && <option value="">{f.section}</option>}
-                {secs.map((s) => <option key={s}>{s}</option>)}
-                <option value="__new">New section…</option>
-              </select>
-            ) : (
-              <input autoFocus value={newSec} onChange={(e) => setNewSec(e.target.value)} placeholder="e.g. Lighting" maxLength={30} />
-            )}
+            <select value={f.section} onChange={set("section")}>
+              {secs.map((s) => <option key={s}>{s}</option>)}
+            </select>
           </label>
         </div>
         <label className="field"><span>Notes</span><textarea rows={2} value={f.notes} onChange={set("notes")} placeholder="Colour, size, alternatives…" /></label>
+        <label className="field"><span>Photo link</span>
+          <input type="url" inputMode="url" value={photo} onChange={(e) => setPhoto(e.target.value)} placeholder="Paste an image address to use a different photo" />
+          <small className="field-hint">Wrong photo? On the shop&rsquo;s page, right-click (or press and hold) the product photo, choose &ldquo;Copy image address&rdquo; and paste it here.</small>
+        </label>
         <label className="switch"><input type="checkbox" checked={f.included} onChange={set("included")} /><span>Include in our total</span></label>
         <div className="sheet-foot">
           <button type="button" className="btn ghost danger" onClick={onRemove}>Remove</button>
           <button className="btn primary">Done</button>
-        </div>
-      </form>
-    </Sheet>
-  );
-}
-
-function RoomSheet({ room, count, onClose, onRename, onRemove }) {
-  const [name, setName] = useState(room.name);
-  return (
-    <Sheet title="Room options" onClose={onClose}>
-      <form className="form" onSubmit={(e) => { e.preventDefault(); onRename(name); }}>
-        <label className="field"><span>Room name</span><input value={name} onChange={(e) => setName(e.target.value)} maxLength={40} /></label>
-        <div className="sheet-foot">
-          <button type="button" className="btn ghost danger" onClick={onRemove}>
-            Remove room{count ? ` and ${count} piece${count === 1 ? "" : "s"}` : ""}
-          </button>
-          <button className="btn primary">Save</button>
         </div>
       </form>
     </Sheet>
