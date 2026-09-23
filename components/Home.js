@@ -18,6 +18,13 @@ const strip = ({ _local, _reading, ...row }) => row;
 const isLoading = (it) => it.status === "loading" && (it._reading || Date.now() - new Date(it.created_at).getTime() < 45000);
 
 
+/* The page you're on lives in the web address, so the back button works. */
+const roomFromHash = () => {
+  if (typeof window === "undefined") return null;
+  const m = window.location.hash.match(/^#\/room\/([^/]+)/);
+  return m ? decodeURIComponent(m[1]) : null;
+};
+
 export default function Home({ householdId }) {
   const sb = getSupabase();
   const [home, setHome] = useState(null);
@@ -30,6 +37,7 @@ export default function Home({ householdId }) {
   const [selecting, setSelecting] = useState(false);
   const [selected, setSelected] = useState(() => new Set());
   const [justAdded, setJustAdded] = useState(null);
+  const [roomView, setRoomView] = useState(null);
   const [toast, setToast] = useState(null);
   const toastTimer = useRef(null);
   const reloadTimer = useRef(null);
@@ -66,6 +74,21 @@ export default function Home({ householdId }) {
     window.addEventListener("focus", schedule);
     return () => { sb.removeChannel(channel); window.removeEventListener("focus", schedule); };
   }, [sb, householdId, load]);
+
+  useEffect(() => {
+    const sync = () => setRoomView(roomFromHash());
+    sync();
+    window.addEventListener("hashchange", sync);
+    return () => window.removeEventListener("hashchange", sync);
+  }, []);
+
+  function openRoom(id) {
+    const h = id ? `#/room/${encodeURIComponent(id)}` : "#/";
+    if (window.location.hash !== h) window.location.hash = h;
+    setRoomView(id);
+    setSelecting(false); setSelected(new Set());
+    window.scrollTo({ top: 0 });
+  }
 
   function showToast(message, undo) {
     clearTimeout(toastTimer.current);
@@ -188,7 +211,7 @@ export default function Home({ householdId }) {
     const row = { id: newId(), household_id: householdId, name, position: rooms.length, sections: [] };
     setRooms((p) => [...p, { ...row, created_at: new Date().toISOString() }]);
     setSheet(null);
-    scrollToId(`room-${row.id}`);
+    openRoom(row.id);
     const { error } = await sb.from("rooms").insert(row);
     if (error) { showToast("That room didn't save. Try again."); load(); }
   }
@@ -205,6 +228,7 @@ export default function Home({ householdId }) {
     setSheet(null);
     setRooms((p) => p.filter((x) => x.id !== r.id));
     setItems((p) => p.filter((x) => x.room_id !== r.id));
+    if (roomView === r.id) openRoom(null);
     const { error } = await sb.from("rooms").delete().eq("id", r.id);
     if (error) { showToast("That room didn't delete. Try again."); load(); return; }
     showToast(`Removed ${r.name}${saved.length ? ` and ${saved.length} piece${saved.length === 1 ? "" : "s"}` : ""}.`, async () => {
@@ -266,6 +290,9 @@ export default function Home({ householdId }) {
 
   const editing = items.find((i) => i.id === editingId) || null;
   const house = totals(houseItems);
+  const current = roomView ? roomById(roomView) : null;
+  const shownRooms = current ? [current] : rooms;
+  const currentT = current ? totals(items.filter((i) => i.room_id === current.id)) : null;
   const sheetRoom = sheet?.roomId ? roomById(sheet.roomId) : null;
   const sheetRoomItems = sheetRoom ? items.filter((i) => i.room_id === sheetRoom.id) : [];
   const sheetSectionItems = sheet?.section ? sheetRoomItems.filter((i) => i.section === sheet.section) : [];
@@ -280,12 +307,14 @@ export default function Home({ householdId }) {
         </div>
       </header>
 
-      {rooms.length > 1 && (
-        <nav className="jump" aria-label="Jump to a room">
+      {rooms.length > 0 && (
+        <nav className="jump" aria-label="Rooms">
           <div className="jump-inner">
+            <button aria-current={!current} onClick={() => openRoom(null)}>Whole home</button>
             {rooms.map((r) => (
-              <button key={r.id} onClick={() => scrollToId(`room-${r.id}`)}>{r.name}</button>
+              <button key={r.id} aria-current={current?.id === r.id} onClick={() => openRoom(r.id)}>{r.name}</button>
             ))}
+            <button className="jump-add" onClick={() => setSheet({ kind: "addRoom" })}>+ Room</button>
           </div>
         </nav>
       )}
@@ -301,9 +330,9 @@ export default function Home({ householdId }) {
           </div>
         ) : (
           <>
-            {rooms.map((r) => (
+            {shownRooms.map((r) => (
               <RoomBlock
-                key={r.id} room={r} items={items.filter((i) => i.room_id === r.id)} currency={currency}
+                key={r.id} room={r} single={!!current} onOpen={() => openRoom(r.id)} items={items.filter((i) => i.room_id === r.id)} currency={currency}
                 selecting={selecting} selected={selected} justAdded={justAdded} secKey={secKey}
                 onEditRoom={() => setSheet({ kind: "editRoom", roomId: r.id })}
                 onAddSection={() => setSheet({ kind: "addSection", roomId: r.id })}
@@ -315,7 +344,7 @@ export default function Home({ householdId }) {
                 onRemove={removeItem}
               />
             ))}
-            <button className="add-room" onClick={() => setSheet({ kind: "addRoom" })}>+ Add a room</button>
+            {!current && <button className="add-room" onClick={() => setSheet({ kind: "addRoom" })}>+ Add a room</button>}
           </>
         )}
       </main>
@@ -333,11 +362,18 @@ export default function Home({ householdId }) {
             <span className="tally-label">Whole house</span>
             <span className="tally-big">{money(house.included, currency)}</span>
           </div>
-          <div className="tally-side">
-            {house.count
-              ? <>{house.includedCount} of {house.count} pieces included<br /><span>{money(house.all, currency)} if you bought everything</span></>
-              : "Totals appear as you add pieces"}
-          </div>
+          {current ? (
+            <div className="tally-block tally-room">
+              <span className="tally-label">{current.name}</span>
+              <span className="tally-mid">{money(currentT.included, currency)}</span>
+            </div>
+          ) : (
+            <div className="tally-side">
+              {house.count
+                ? <>{house.includedCount} of {house.count} pieces included<br /><span>{money(house.all, currency)} if you bought everything</span></>
+                : "Totals appear as you add pieces"}
+            </div>
+          )}
         </footer>
       )}
 
@@ -399,17 +435,20 @@ export default function Home({ householdId }) {
 
 /* ---------- one room, with all its sections ---------- */
 
-function RoomBlock({ room, items, currency, selecting, selected, justAdded, secKey, onEditRoom, onAddSection, onEditSection, onAdd, onSelect, onEdit, onToggle, onRemove }) {
+function RoomBlock({ room, single, onOpen, items, currency, selecting, selected, justAdded, secKey, onEditRoom, onAddSection, onEditSection, onAdd, onSelect, onEdit, onToggle, onRemove }) {
   const t = totals(items);
   const names = [...sectionsOf(room), ...new Set(items.map((i) => i.section).filter((s) => !sectionsOf(room).includes(s)))];
   return (
-    <section className="room" id={`room-${room.id}`}>
+    <section className={`room${single ? " single" : ""}`} id={`room-${room.id}`}>
       <div className="room-head">
         <div>
-          <h2 className="room-title">{room.name}</h2>
+          {single
+            ? <h1 className="room-title">{room.name}</h1>
+            : <h2 className="room-title"><button className="room-open" onClick={onOpen}>{room.name}</button></h2>}
           <p className="room-sub">{t.count ? `${money(t.included, currency)} · ${t.includedCount} of ${t.count} piece${t.count === 1 ? "" : "s"} included` : "No pieces yet"}</p>
         </div>
         <div className="head-actions">
+          {!single && <button className="btn ghost" onClick={onOpen}>Open room</button>}
           <button className="btn" onClick={onAddSection}>+ Section</button>
           <button className="btn ghost" onClick={onEditRoom}>Edit room</button>
         </div>

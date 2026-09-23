@@ -327,3 +327,11 @@ img { max-width: 100%; display: block; }
   .sec-head h3 { font-size: 26px; }
   .add-room { font-size: 26px; margin-top: -24px; }
 }
+
+/* ---------- room pages ---------- */
+.jump button[aria-current="true"] { color: var(--ink); font-style: italic; box-shadow: inset 0 -1px 0 var(--ink); }
+.jump .jump-add { font: 400 14px/1 var(--body); letter-spacing: .05em; }
+.room-open { font: inherit; letter-spacing: inherit; text-align: left; }
+.room-open:hover { font-style: italic; }
+.room.single { border-bottom: 0; }
+.tally .tally-room { margin-left: auto; text-align: right; }
