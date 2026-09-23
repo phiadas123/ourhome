@@ -11,7 +11,8 @@ const SHOPS = {
 
 export function shopFromUrl(url) {
   try {
-    const host = new URL(url).hostname.replace(/^www\d?\./, "").replace(/^(m|uk|shop|store)\./, "");
+    let host = new URL(url).hostname.replace(/^www\d?\./, "");
+    if (host.split(".").length > 2) host = host.replace(/^(m|uk|shop|store)\./, "");
     const key = host.split(".")[0];
     return SHOPS[key] || SHOPS[key.replace(/-/g, "")] || key.charAt(0).toUpperCase() + key.slice(1);
   } catch {
