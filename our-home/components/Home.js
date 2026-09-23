@@ -425,7 +425,7 @@ export default function Home({ householdId }) {
       )}
       {sheet?.kind === "settings" && home && (
         <SettingsSheet home={home} onClose={() => setSheet(null)} onSave={saveHome}
-          onSignOut={() => sb.auth.signOut()} onCopied={() => showToast("Invite code copied.")} />
+          onCopied={() => showToast("Invite code copied.")} />
       )}
 
       {toast && (
@@ -871,7 +871,7 @@ function EditSheet({ item, rooms, currency, onClose, onSave, onRefresh, onRemove
   );
 }
 
-function SettingsSheet({ home, onClose, onSave, onSignOut, onCopied }) {
+function SettingsSheet({ home, onClose, onSave, onCopied }) {
   const [name, setName] = useState(home.name);
   return (
     <Sheet title="Settings" onClose={onClose}>
@@ -885,15 +885,15 @@ function SettingsSheet({ home, onClose, onSave, onSignOut, onCopied }) {
           </select>
         </label>
         <div className="field">
-          <span>Invite your partner</span>
-          <p className="note">They sign in with their own email, choose &ldquo;I have an invite code&rdquo; and enter:</p>
+          <span>Invite code</span>
+          <p className="note">To open your home on another phone or laptop, or to share it with your partner, open the site there, choose &ldquo;I have an invite code&rdquo; and enter:</p>
           <div className="invite">
             <strong>{home.invite_code}</strong>
             <button type="button" className="btn" onClick={() => { navigator.clipboard?.writeText(home.invite_code).then(onCopied, () => {}); }}>Copy</button>
           </div>
         </div>
         <div className="sheet-foot">
-          <button type="button" className="btn ghost" onClick={onSignOut}>Sign out</button>
+          <span />
           <button type="button" className="btn primary" onClick={onClose}>Done</button>
         </div>
       </div>

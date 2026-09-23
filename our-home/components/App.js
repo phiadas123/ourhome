@@ -7,11 +7,18 @@ import Home from "./Home";
 export default function App() {
   const [session, setSession] = useState(undefined);
   const [householdId, setHouseholdId] = useState(undefined);
+  const [setupError, setSetupError] = useState("");
 
+  // No sign-in page: each device is remembered automatically.
   useEffect(() => {
     const sb = getSupabase();
-    sb.auth.getSession().then(({ data }) => setSession(data.session));
-    const { data: sub } = sb.auth.onAuthStateChange((_e, s) => setSession(s));
+    sb.auth.getSession().then(async ({ data }) => {
+      if (data.session) { setSession(data.session); return; }
+      const { data: anon, error } = await sb.auth.signInAnonymously();
+      if (error) setSetupError(error.message);
+      else setSession(anon.session);
+    });
+    const { data: sub } = sb.auth.onAuthStateChange((_e, s) => { if (s) setSession(s); });
     return () => sub.subscription.unsubscribe();
   }, []);
 
@@ -26,56 +33,22 @@ export default function App() {
       .then(({ data }) => setHouseholdId(data?.[0]?.household_id || null));
   }, [session]);
 
-  if (session === undefined || (session && householdId === undefined)) {
+  if (setupError) {
+    return (
+      <main className="gate">
+        <div className="gate-inner">
+          <h1 className="gate-title">Our home</h1>
+          <p className="gate-text">One setting needs switching on. In Supabase, open Authentication, then Sign In / Providers, and turn on &ldquo;Allow anonymous sign-ins&rdquo;. Then reload this page.</p>
+          <p className="gate-error">{setupError}</p>
+        </div>
+      </main>
+    );
+  }
+  if (!session || householdId === undefined) {
     return <div className="splash">Our home</div>;
   }
-  if (!session) return <SignIn />;
   if (!householdId) return <Welcome onReady={setHouseholdId} />;
   return <Home householdId={householdId} />;
-}
-
-function SignIn() {
-  const [email, setEmail] = useState("");
-  const [state, setState] = useState("idle");
-  const [error, setError] = useState("");
-
-  async function send(e) {
-    e.preventDefault();
-    setState("sending"); setError("");
-    const { error } = await getSupabase().auth.signInWithOtp({
-      email: email.trim(),
-      options: { emailRedirectTo: window.location.origin },
-    });
-    if (error) { setError(error.message); setState("idle"); }
-    else setState("sent");
-  }
-
-  return (
-    <main className="gate">
-      <div className="gate-inner">
-        <h1 className="gate-title">Our home</h1>
-        {state === "sent" ? (
-          <p className="gate-text">
-            Check your email. We&rsquo;ve sent a sign-in link to <strong>{email}</strong>. Open it on this device to come straight in.
-          </p>
-        ) : (
-          <>
-            <p className="gate-text">Everything you want for the house, in one beautiful place.</p>
-            <form onSubmit={send} className="gate-form">
-              <input
-                type="email" required autoComplete="email" placeholder="Your email"
-                value={email} onChange={(e) => setEmail(e.target.value)} aria-label="Email"
-              />
-              <button className="btn primary" disabled={state === "sending"}>
-                {state === "sending" ? "Sending…" : "Email me a sign-in link"}
-              </button>
-            </form>
-            {error && <p className="gate-error">{error}</p>}
-          </>
-        )}
-      </div>
-    </main>
-  );
 }
 
 function Welcome({ onReady }) {
@@ -105,7 +78,7 @@ function Welcome({ onReady }) {
         <h1 className="gate-title">Welcome</h1>
         {mode === "choose" ? (
           <>
-            <p className="gate-text">Start your home list, or join your partner&rsquo;s with their invite code.</p>
+            <p className="gate-text">Start your home list, or join one that&rsquo;s already set up using its invite code (it&rsquo;s in Settings on any device that&rsquo;s already in).</p>
             <div className="gate-form">
               <button className="btn primary" onClick={create} disabled={busy}>{busy ? "Setting up…" : "Start our home"}</button>
               <button className="btn" onClick={() => setMode("join")}>I have an invite code</button>
@@ -113,7 +86,7 @@ function Welcome({ onReady }) {
           </>
         ) : (
           <form onSubmit={join} className="gate-form">
-            <p className="gate-text">Enter the six-letter code from your partner&rsquo;s Settings.</p>
+            <p className="gate-text">Enter the six-character invite code from Settings on a device that&rsquo;s already in.</p>
             <input value={code} onChange={(e) => setCode(e.target.value.toUpperCase())} placeholder="Invite code" maxLength={6} aria-label="Invite code" required />
             <button className="btn primary" disabled={busy}>{busy ? "Joining…" : "Join home"}</button>
             <button type="button" className="btn ghost" onClick={() => setMode("choose")}>Back</button>
