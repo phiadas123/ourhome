@@ -108,3 +108,11 @@ exception when others then null; end $$;
 do $$ begin
   alter publication supabase_realtime add table public.items;
 exception when others then null; end $$;
+
+-- Photo uploads
+insert into storage.buckets (id, name, public) values ('photos', 'photos', true) on conflict (id) do nothing;
+drop policy if exists "members upload photos" on storage.objects;
+create policy "members upload photos" on storage.objects for insert to authenticated
+  with check (bucket_id = 'photos' and public.is_member(((storage.foldername(name))[1])::uuid));
+drop policy if exists "anyone views photos" on storage.objects;
+create policy "anyone views photos" on storage.objects for select using (bucket_id = 'photos');

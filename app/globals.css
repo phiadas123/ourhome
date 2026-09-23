@@ -335,3 +335,5 @@ img { max-width: 100%; display: block; }
 .room-open:hover { font-style: italic; }
 .room.single { border-bottom: 0; }
 .tally .tally-room { margin-left: auto; text-align: right; }
+
+.photo-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; margin-top: 4px; }

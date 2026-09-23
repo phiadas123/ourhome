@@ -18,6 +18,20 @@ const strip = ({ _local, _reading, ...row }) => row;
 const isLoading = (it) => it.status === "loading" && (it._reading || Date.now() - new Date(it.created_at).getTime() < 45000);
 
 
+async function shrinkImage(file) {
+  try {
+    const bmp = await createImageBitmap(file);
+    const scale = Math.min(1, 1400 / Math.max(bmp.width, bmp.height));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.round(bmp.width * scale);
+    canvas.height = Math.round(bmp.height * scale);
+    canvas.getContext("2d").drawImage(bmp, 0, 0, canvas.width, canvas.height);
+    return await new Promise((res) => canvas.toBlob((b) => res(b || file), "image/jpeg", 0.85));
+  } catch {
+    return file;
+  }
+}
+
 /* The page you're on lives in the web address, so the back button works. */
 const roomFromHash = () => {
   if (typeof window === "undefined") return null;
@@ -116,6 +130,15 @@ export default function Home({ householdId }) {
     } catch { return null; }
   }
 
+  // Photos you upload are shrunk on your device first, then stored in Supabase.
+  async function uploadPhoto(file) {
+    const blob = await shrinkImage(file);
+    const path = `${householdId}/${newId()}.jpg`;
+    const { error } = await sb.storage.from("photos").upload(path, blob, { contentType: blob.type || "image/jpeg", upsert: false });
+    if (error) throw error;
+    return sb.storage.from("photos").getPublicUrl(path).data.publicUrl;
+  }
+
   async function addPiece(data, target) {
     const id = newId();
     const row = {
@@ -159,7 +182,7 @@ export default function Home({ householdId }) {
     if (error) { showToast("That change didn't save. Try again."); load(); }
   }
 
-  async function refreshItem(it, newUrl) {
+  async function refreshItem(it, newUrl, keepPhoto = false) {
     const url = newUrl || it.url;
     const linkChanged = url !== it.url;
     setItems((p) => p.map((x) => (x.id === it.id ? { ...x, url, status: "loading", _reading: true } : x)));
@@ -167,7 +190,7 @@ export default function Home({ householdId }) {
     const keep = linkChanged ? { title: titleFromUrl(url) || shopFromUrl(url), shop: shopFromUrl(url), image_url: null, price: null, currency: null } : it;
     const patch = info
       ? {
-          url, title: info.title || keep.title, shop: info.shop || keep.shop, image_url: info.image || keep.image_url,
+          url, title: info.title || keep.title, shop: info.shop || keep.shop, image_url: keepPhoto ? it.image_url : info.image || keep.image_url,
           price: info.price ?? keep.price, currency: info.currency || keep.currency,
           status: (info.price ?? keep.price) != null ? "ready" : "needs_price",
         }
@@ -378,19 +401,19 @@ export default function Home({ householdId }) {
       )}
 
       {adding && roomById(adding.roomId) && (
-        <AddSheet where={adding.section} currency={currency} readLink={readLink}
+        <AddSheet where={adding.section} currency={currency} readLink={readLink} onUpload={uploadPhoto}
           onClose={() => setAdding(null)} onAdd={(d) => addPiece(d, adding)}
           onAddMany={(urls) => { const t = adding; setAdding(null); urls.forEach((u) => addFromLink(u, t)); showToast(`Adding ${urls.length} pieces…`); scrollToId(secKey(t.roomId, t.section)); }} />
       )}
 
       {editing && (
         <EditSheet
-          key={editing.id} item={editing} rooms={rooms} currency={currency}
+          key={editing.id} item={editing} rooms={rooms} currency={currency} onUpload={uploadPhoto}
           onClose={() => setEditingId(null)}
-          onSave={(patch, newUrl) => {
+          onSave={(patch, newUrl, photoChanged) => {
             const it = editing;
             setEditingId(null);
-            updateItem(it.id, patch).then(() => { if (newUrl) refreshItem({ ...it, ...patch }, newUrl); });
+            updateItem(it.id, patch).then(() => { if (newUrl) refreshItem({ ...it, ...patch }, newUrl, photoChanged); });
           }}
           onRefresh={() => refreshItem(editing)}
           onRemove={() => removeItem(editing)}
@@ -495,7 +518,7 @@ function RoomBlock({ room, single, onOpen, items, currency, selecting, selected,
 
 /* ---------- pieces ---------- */
 
-function AddSheet({ where, currency, readLink, onClose, onAdd, onAddMany }) {
+function AddSheet({ where, currency, readLink, onUpload, onClose, onAdd, onAddMany }) {
   const [step, setStep] = useState("link");
   const [link, setLink] = useState("");
   const [error, setError] = useState("");
@@ -587,7 +610,7 @@ function AddSheet({ where, currency, readLink, onClose, onAdd, onAddMany }) {
                     <p className="card-shop">{f.shop}</p>
                     <p className="preview-title">{f.title || "Untitled"}</p>
                     <p className="preview-price">{f.price !== "" ? money(f.price, f.currency || currency) : "No price found"}</p>
-                    <button type="button" className="link" onClick={() => setShowPhoto((v) => !v)}>{showPhoto ? "Hide photo link" : "Wrong photo?"}</button>
+                    <button type="button" className="link" onClick={() => setShowPhoto((v) => !v)}>{showPhoto ? "Keep this photo" : "Change photo"}</button>
                   </>
                 )}
               </div>
@@ -596,10 +619,8 @@ function AddSheet({ where, currency, readLink, onClose, onAdd, onAddMany }) {
             {!reading && (
               <>
                 {showPhoto && (
-                  <label className="field"><span>Photo link</span>
-                    <input type="url" inputMode="url" value={f.image} onChange={(e) => { set("image")(e); setImgFailed(false); }} placeholder="Paste an image address" />
-                    <small className="field-hint">On the shop&rsquo;s page, right-click (or press and hold) the product photo, choose &ldquo;Copy image address&rdquo; and paste it here.</small>
-                  </label>
+                  <PhotoPicker value={f.image} onUpload={onUpload}
+                    onChange={(url) => { setF((p) => ({ ...p, image: url })); setImgFailed(false); }} />
                 )}
                 <label className="field"><span>Name</span><input value={f.title} onChange={set("title")} /></label>
                 <div className="row">
@@ -719,7 +740,7 @@ function NameSheet({ title, label, initial = "", placeholder, action, suggestion
   );
 }
 
-function EditSheet({ item, rooms, currency, onClose, onSave, onRefresh, onRemove }) {
+function EditSheet({ item, rooms, currency, onUpload, onClose, onSave, onRefresh, onRemove }) {
   const [link, setLink] = useState(item.url);
   const [photo, setPhoto] = useState(item.image_url || "");
   const [linkError, setLinkError] = useState("");
@@ -747,16 +768,16 @@ function EditSheet({ item, rooms, currency, onClose, onSave, onRefresh, onRemove
       room_id: f.room_id, section: secs.includes(f.section) ? f.section : secs[0],
       notes: f.notes.trim() || null, included: f.included,
       status: f.price === "" ? (item.status === "failed" ? "failed" : "needs_price") : "ready",
-    }, newUrl);
+    }, newUrl, (cleanPhoto || null) !== (item.image_url || null));
   }
 
   return (
     <Sheet title="Edit piece" onClose={onClose}>
       <form onSubmit={save} className="form">
         <div className="edit-top">
-          {item.image_url ? (
+          {photo ? (
             // eslint-disable-next-line @next/next/no-img-element
-            <img src={item.image_url} alt="" referrerPolicy="no-referrer" />
+            <img src={photo} alt="" referrerPolicy="no-referrer" />
           ) : <div className="edit-blank" />}
           <div>
             <p className="card-shop">{item.shop}</p>
@@ -764,6 +785,7 @@ function EditSheet({ item, rooms, currency, onClose, onSave, onRefresh, onRemove
             <button type="button" className="link" onClick={onRefresh} disabled={loading}>{loading ? "Refreshing…" : "Refresh photo and price"}</button>
           </div>
         </div>
+        <PhotoPicker value={photo} onChange={setPhoto} onUpload={onUpload} />
         {item.status === "failed" && <p className="note">This shop didn&rsquo;t share its details. Add the name and price below.</p>}
         <label className="field"><span>Product link</span>
           <input type="url" inputMode="url" value={link} onChange={(e) => { setLink(e.target.value); setLinkError(""); }} />
@@ -794,10 +816,6 @@ function EditSheet({ item, rooms, currency, onClose, onSave, onRefresh, onRemove
           </label>
         </div>
         <label className="field"><span>Notes</span><textarea rows={2} value={f.notes} onChange={set("notes")} placeholder="Colour, size, alternatives…" /></label>
-        <label className="field"><span>Photo link</span>
-          <input type="url" inputMode="url" value={photo} onChange={(e) => setPhoto(e.target.value)} placeholder="Paste an image address to use a different photo" />
-          <small className="field-hint">Wrong photo? On the shop&rsquo;s page, right-click (or press and hold) the product photo, choose &ldquo;Copy image address&rdquo; and paste it here.</small>
-        </label>
         <label className="switch"><input type="checkbox" checked={f.included} onChange={set("included")} /><span>Include in our total</span></label>
         <div className="sheet-foot">
           <button type="button" className="btn ghost danger" onClick={onRemove}>Remove</button>
@@ -835,5 +853,44 @@ function SettingsSheet({ home, onClose, onSave, onCopied }) {
         </div>
       </div>
     </Sheet>
+  );
+}
+
+function PhotoPicker({ value, onChange, onUpload }) {
+  const [showLink, setShowLink] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const fileRef = useRef(null);
+
+  async function pick(e) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    if (!file.type.startsWith("image/")) { setError("Choose a photo file."); return; }
+    setBusy(true); setError("");
+    try { onChange(await onUpload(file)); }
+    catch { setError("That photo didn't upload. Try again, or choose a smaller one."); }
+    setBusy(false);
+  }
+
+  return (
+    <div className="field">
+      <span>Photo</span>
+      <div className="photo-actions">
+        <button type="button" className="btn" onClick={() => fileRef.current?.click()} disabled={busy}>
+          {busy ? "Uploading…" : "Upload a photo"}
+        </button>
+        <button type="button" className="link" onClick={() => setShowLink((v) => !v)}>Use an image link</button>
+        {value && <button type="button" className="link" onClick={() => onChange("")}>Remove photo</button>}
+        <input ref={fileRef} type="file" accept="image/*" hidden onChange={pick} />
+      </div>
+      {showLink && (
+        <>
+          <input type="url" inputMode="url" value={value} onChange={(e) => onChange(e.target.value)} placeholder="Paste an image address" />
+          <small className="field-hint">On the shop&rsquo;s page, right-click (or press and hold) the product photo, choose &ldquo;Copy image address&rdquo; and paste it here.</small>
+        </>
+      )}
+      {error && <small className="field-hint error">{error}</small>}
+    </div>
   );
 }
