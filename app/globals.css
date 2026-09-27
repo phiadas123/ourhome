@@ -396,3 +396,7 @@ img { max-width: 100%; display: block; }
   .inspo { columns: 2; column-gap: 10px; }
   .color-big { width: 88px; height: 88px; }
 }
+
+.seg { display: inline-flex; border: 1px solid var(--line); align-self: flex-start; }
+.seg button { padding: 10px 22px; font-size: 13px; letter-spacing: .06em; color: var(--muted); min-height: 40px; transition: background .2s, color .2s; }
+.seg button.on { background: var(--btn); color: var(--btn-ink); }

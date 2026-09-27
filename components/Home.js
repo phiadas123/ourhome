@@ -13,7 +13,15 @@ const newId = () =>
       });
 
 const sectionsOf = (room) => room?.sections || [];
-const designOf = (room) => ({ colors: [], textures: [], inspiration: [], ...(room?.design || {}) });
+// A room's palette mixes colours and texture photos. Older boards stored them separately, so merge those in.
+const designOf = (room) => {
+  const d = room?.design || {};
+  const palette = d.palette || [
+    ...(d.colors || []).map((c) => ({ ...c, kind: "color" })),
+    ...(d.textures || []).map((t) => ({ ...t, kind: "texture" })),
+  ];
+  return { palette, inspiration: d.inspiration || [] };
+};
 const strip = ({ _local, _reading, ...row }) => row;
 // A piece only shows as "finding details" while it's actually being read (not forever if reading was interrupted).
 const isLoading = (it) => it.status === "loading" && (it._reading || Date.now() - new Date(it.created_at).getTime() < 45000);
@@ -377,8 +385,7 @@ export default function Home({ householdId }) {
                 key={r.id} room={r} single={!!current} onOpen={() => openRoom(r.id)} items={items.filter((i) => i.room_id === r.id)} currency={currency}
                 selecting={selecting} selected={selected} justAdded={justAdded} secKey={secKey}
                 onEditRoom={() => setSheet({ kind: "editRoom", roomId: r.id })}
-                onColor={(id) => setSheet({ kind: "color", roomId: r.id, id })}
-                onTexture={(id) => setSheet({ kind: "texture", roomId: r.id, id })}
+                onSwatch={(id) => setSheet({ kind: "swatch", roomId: r.id, id })}
                 onAddInspo={() => setSheet({ kind: "inspo", roomId: r.id })}
                 onViewInspo={(id) => setSheet({ kind: "viewInspo", roomId: r.id, id })}
                 onAddSection={() => setSheet({ kind: "addSection", roomId: r.id })}
@@ -465,21 +472,13 @@ export default function Home({ householdId }) {
           removeLabel={`Remove section${sheetSectionItems.length ? ` and ${sheetSectionItems.length} piece${sheetSectionItems.length === 1 ? "" : "s"}` : ""}`}
           onRemove={() => removeSection(sheetRoom, sheet.section)} />
       )}
-      {sheet?.kind === "color" && sheetRoom && (
-        <ColorSheet
-          initial={designOf(sheetRoom).colors.find((c) => c.id === sheet.id)}
-          onClose={() => setSheet(null)}
-          onSave={(c) => { const d = designOf(sheetRoom); saveDesign(sheetRoom, { ...d, colors: upsertIn(d.colors, c) }); }}
-          onRemove={(c) => { const d = designOf(sheetRoom); saveDesign(sheetRoom, { ...d, colors: d.colors.filter((x) => x.id !== c.id) }, "Colour removed."); }}
-        />
-      )}
-      {sheet?.kind === "texture" && sheetRoom && (
-        <TextureSheet
-          initial={designOf(sheetRoom).textures.find((t) => t.id === sheet.id)}
+      {sheet?.kind === "swatch" && sheetRoom && (
+        <SwatchSheet
+          initial={designOf(sheetRoom).palette.find((x) => x.id === sheet.id)}
           onUpload={uploadPhoto}
           onClose={() => setSheet(null)}
-          onSave={(t) => { const d = designOf(sheetRoom); saveDesign(sheetRoom, { ...d, textures: upsertIn(d.textures, t) }); }}
-          onRemove={(t) => { const d = designOf(sheetRoom); saveDesign(sheetRoom, { ...d, textures: d.textures.filter((x) => x.id !== t.id) }, "Texture removed."); }}
+          onSave={(sw) => { const d = designOf(sheetRoom); saveDesign(sheetRoom, { ...d, palette: upsertIn(d.palette, sw) }); }}
+          onRemove={(sw) => { const d = designOf(sheetRoom); saveDesign(sheetRoom, { ...d, palette: d.palette.filter((x) => x.id !== sw.id) }, sw.kind === "texture" ? "Texture removed." : "Colour removed."); }}
         />
       )}
       {sheet?.kind === "inspo" && sheetRoom && (
@@ -513,7 +512,7 @@ export default function Home({ householdId }) {
 
 /* ---------- one room, with all its sections ---------- */
 
-function RoomBlock({ room, single, onOpen, onColor, onTexture, onAddInspo, onViewInspo, items, currency, selecting, selected, justAdded, secKey, onEditRoom, onAddSection, onEditSection, onAdd, onSelect, onEdit, onToggle, onRemove }) {
+function RoomBlock({ room, single, onOpen, onSwatch, onAddInspo, onViewInspo, items, currency, selecting, selected, justAdded, secKey, onEditRoom, onAddSection, onEditSection, onAdd, onSelect, onEdit, onToggle, onRemove }) {
   const t = totals(items);
   const names = [...sectionsOf(room), ...new Set(items.map((i) => i.section).filter((s) => !sectionsOf(room).includes(s)))];
   return (
@@ -533,7 +532,7 @@ function RoomBlock({ room, single, onOpen, onColor, onTexture, onAddInspo, onVie
       </div>
 
       {single
-        ? <DesignBoard design={designOf(room)} onColor={onColor} onTexture={onTexture} onAddInspo={onAddInspo} onViewInspo={onViewInspo} />
+        ? <DesignBoard design={designOf(room)} onSwatch={onSwatch} onAddInspo={onAddInspo} onViewInspo={onViewInspo} />
         : <DesignStrip design={designOf(room)} onOpen={onOpen} />}
 
       {!names.length && (
@@ -957,22 +956,24 @@ function PhotoPicker({ value, onChange, onUpload }) {
 
 /* ---------- design board ---------- */
 
+const swatchStyle = (sw) =>
+  sw.kind === "texture" ? { backgroundImage: `url("${sw.url}")`, backgroundSize: "cover", backgroundPosition: "center" } : { background: sw.hex };
+
 function DesignStrip({ design, onOpen }) {
-  const { colors, textures, inspiration } = design;
-  if (!colors.length && !textures.length && !inspiration.length) {
-    return <button className="design-hint" onClick={onOpen}>+ Add a design board with colours, textures and inspiration</button>;
+  const { palette, inspiration } = design;
+  if (!palette.length && !inspiration.length) {
+    return <button className="design-hint" onClick={onOpen}>+ Add a design board with a palette and inspiration</button>;
   }
-  const pics = [...textures, ...inspiration].slice(0, 6);
   return (
     <button className="design-strip" onClick={onOpen} aria-label="Open design board">
-      {colors.length > 0 && (
+      {palette.length > 0 && (
         <span className="strip-colors">
-          {colors.map((c) => <span key={c.id} className="dot" style={{ background: c.hex }} />)}
+          {palette.map((sw) => <span key={sw.id} className="dot" style={swatchStyle(sw)} />)}
         </span>
       )}
-      {pics.length > 0 && (
+      {inspiration.length > 0 && (
         <span className="strip-pics">
-          {pics.map((p) => (
+          {inspiration.slice(0, 6).map((p) => (
             // eslint-disable-next-line @next/next/no-img-element
             <img key={p.id} src={p.url} alt="" loading="lazy" referrerPolicy="no-referrer" />
           ))}
@@ -982,41 +983,24 @@ function DesignStrip({ design, onOpen }) {
   );
 }
 
-function DesignBoard({ design, onColor, onTexture, onAddInspo, onViewInspo }) {
-  const { colors, textures, inspiration } = design;
+function DesignBoard({ design, onSwatch, onAddInspo, onViewInspo }) {
+  const { palette, inspiration } = design;
   return (
     <div className="board">
       <div className="board-head"><h3>Design</h3></div>
 
       <div className="board-group">
-        <p className="board-label">Colour palette</p>
+        <p className="board-label">Palette</p>
         <div className="palette">
-          {colors.map((c) => (
-            <button key={c.id} className="swatch" onClick={() => onColor(c.id)} aria-label={`Edit ${c.name || c.hex}`}>
-              <span className="swatch-dot" style={{ background: c.hex }} />
-              <span className="swatch-name">{c.name || c.hex.toUpperCase()}</span>
+          {palette.map((sw) => (
+            <button key={sw.id} className="swatch" onClick={() => onSwatch(sw.id)} aria-label={`Edit ${sw.name || (sw.kind === "texture" ? "texture" : sw.hex)}`}>
+              <span className="swatch-dot" style={swatchStyle(sw)} />
+              <span className="swatch-name">{sw.name || (sw.kind === "texture" ? "Texture" : sw.hex.toUpperCase())}</span>
             </button>
           ))}
-          <button className="swatch add" onClick={() => onColor(null)} aria-label="Add a colour">
+          <button className="swatch add" onClick={() => onSwatch(null)} aria-label="Add a colour or texture">
             <span className="swatch-dot">+</span>
-            <span className="swatch-name">Add colour</span>
-          </button>
-        </div>
-      </div>
-
-      <div className="board-group">
-        <p className="board-label">Textures</p>
-        <div className="textures">
-          {textures.map((t) => (
-            <button key={t.id} className="texture" onClick={() => onTexture(t.id)} aria-label={`Edit ${t.name || "texture"}`}>
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img src={t.url} alt="" loading="lazy" referrerPolicy="no-referrer" />
-              <span>{t.name || "Texture"}</span>
-            </button>
-          ))}
-          <button className="texture add" onClick={() => onTexture(null)}>
-            <span className="texture-plus">+</span>
-            <span>Add texture</span>
+            <span className="swatch-name">Add</span>
           </button>
         </div>
       </div>
@@ -1042,59 +1026,70 @@ function DesignBoard({ design, onColor, onTexture, onAddInspo, onViewInspo }) {
 
 const PRESET_COLORS = ["#F4F1EA", "#E8E1D5", "#D8CBB8", "#B9A589", "#8C7355", "#5E4B3C", "#3B3833", "#9AA394", "#6F7D6A", "#7B8C93", "#34424A", "#C9A9A0", "#A45A4A", "#D6B26E"];
 
-function ColorSheet({ initial, onClose, onSave, onRemove }) {
+function SwatchSheet({ initial, onUpload, onClose, onSave, onRemove }) {
+  const [kind, setKind] = useState(initial?.kind || "color");
   const [hex, setHex] = useState(initial?.hex || "#D8CBB8");
-  const [name, setName] = useState(initial?.name || "");
-  const valid = /^#[0-9a-f]{6}$/i.test(hex);
-  return (
-    <Sheet title={initial ? "Edit colour" : "Add a colour"} onClose={onClose}>
-      <form className="form" onSubmit={(e) => { e.preventDefault(); if (valid) onSave({ id: initial?.id || newId(), hex, name: name.trim() }); }}>
-        <div className="color-pick">
-          <label className="color-big" style={{ background: valid ? hex : "transparent" }}>
-            <input type="color" value={valid ? hex : "#000000"} onChange={(e) => setHex(e.target.value)} aria-label="Pick a colour" />
-          </label>
-          <div className="color-fields">
-            <label className="field"><span>Colour code</span>
-              <input value={hex} onChange={(e) => { let v = e.target.value.trim(); if (v && !v.startsWith("#")) v = "#" + v; setHex(v); }} maxLength={7} placeholder="#D8CBB8" />
-            </label>
-            <label className="field"><span>Name (optional)</span>
-              <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Warm white" maxLength={30} />
-            </label>
-          </div>
-        </div>
-        <p className="note">Tap the big circle to choose any colour, or pick one of these:</p>
-        <div className="presets">
-          {PRESET_COLORS.map((c) => (
-            <button type="button" key={c} className={`preset${hex.toLowerCase() === c.toLowerCase() ? " on" : ""}`} style={{ background: c }} onClick={() => setHex(c)} aria-label={c} />
-          ))}
-        </div>
-        <div className="sheet-foot">
-          {initial ? <button type="button" className="btn ghost danger" onClick={() => onRemove(initial)}>Remove</button> : <span />}
-          <button className="btn primary" disabled={!valid}>{initial ? "Save" : "Add colour"}</button>
-        </div>
-      </form>
-    </Sheet>
-  );
-}
-
-function TextureSheet({ initial, onUpload, onClose, onSave, onRemove }) {
   const [url, setUrl] = useState(initial?.url || "");
   const [name, setName] = useState(initial?.name || "");
-  const clean = url.trim() ? normalizeUrl(url) : null;
+  const validHex = /^#[0-9a-f]{6}$/i.test(hex);
+  const cleanUrl = url.trim() ? normalizeUrl(url) : null;
+  const ready = kind === "color" ? validHex : !!cleanUrl;
+  const title = initial ? (initial.kind === "texture" ? "Edit texture" : "Edit colour") : "Add to palette";
+
+  function submit(e) {
+    e.preventDefault();
+    if (!ready) return;
+    const base = { id: initial?.id || newId(), name: name.trim(), kind };
+    onSave(kind === "color" ? { ...base, hex } : { ...base, url: cleanUrl });
+  }
+
   return (
-    <Sheet title={initial ? "Edit texture" : "Add a texture"} onClose={onClose}>
-      <form className="form" onSubmit={(e) => { e.preventDefault(); if (clean) onSave({ id: initial?.id || newId(), url: clean, name: name.trim() }); }}>
-        {clean && (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img className="texture-preview" src={clean} alt="" referrerPolicy="no-referrer" />
+    <Sheet title={title} onClose={onClose}>
+      <form className="form" onSubmit={submit}>
+        <div className="seg" role="tablist" aria-label="Colour or photo">
+          <button type="button" role="tab" aria-selected={kind === "color"} className={kind === "color" ? "on" : ""} onClick={() => setKind("color")}>Colour</button>
+          <button type="button" role="tab" aria-selected={kind === "texture"} className={kind === "texture" ? "on" : ""} onClick={() => setKind("texture")}>Photo</button>
+        </div>
+
+        {kind === "color" ? (
+          <>
+            <div className="color-pick">
+              <label className="color-big" style={{ background: validHex ? hex : "transparent" }}>
+                <input type="color" value={validHex ? hex : "#000000"} onChange={(e) => setHex(e.target.value)} aria-label="Pick a colour" />
+              </label>
+              <div className="color-fields">
+                <label className="field"><span>Colour code</span>
+                  <input value={hex} onChange={(e) => { let v = e.target.value.trim(); if (v && !v.startsWith("#")) v = "#" + v; setHex(v); }} maxLength={7} placeholder="#D8CBB8" />
+                </label>
+                <label className="field"><span>Name (optional)</span>
+                  <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Warm white" maxLength={30} />
+                </label>
+              </div>
+            </div>
+            <p className="note">Tap the big circle to choose any colour, or pick one of these:</p>
+            <div className="presets">
+              {PRESET_COLORS.map((c) => (
+                <button type="button" key={c} className={`preset${hex.toLowerCase() === c.toLowerCase() ? " on" : ""}`} style={{ background: c }} onClick={() => setHex(c)} aria-label={c} />
+              ))}
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="color-pick">
+              <div className="color-big" style={cleanUrl ? { backgroundImage: `url("${cleanUrl}")`, backgroundSize: "cover", backgroundPosition: "center" } : { border: "1px dashed var(--soft)" }} />
+              <div className="color-fields">
+                <label className="field"><span>Name (optional)</span>
+                  <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Oak, Bouclé, Travertine" maxLength={30} />
+                </label>
+              </div>
+            </div>
+            <PhotoPicker value={url} onChange={setUrl} onUpload={onUpload} />
+          </>
         )}
-        <PhotoPicker value={url} onChange={setUrl} onUpload={onUpload} />
-        <label className="field"><span>Name (optional)</span>
-          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Oak, Bouclé, Travertine" maxLength={30} />
-        </label>
+
         <div className="sheet-foot">
           {initial ? <button type="button" className="btn ghost danger" onClick={() => onRemove(initial)}>Remove</button> : <span />}
-          <button className="btn primary" disabled={!clean}>{initial ? "Save" : "Add texture"}</button>
+          <button className="btn primary" disabled={!ready}>{initial ? "Save" : "Add to palette"}</button>
         </div>
       </form>
     </Sheet>
