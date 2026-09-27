@@ -22,6 +22,7 @@ create table if not exists public.rooms (
   household_id uuid not null references public.households on delete cascade,
   name text not null,
   sections text[] not null default '{}',
+  design jsonb not null default '{}'::jsonb,
   position int not null default 0,
   created_at timestamptz not null default now()
 );

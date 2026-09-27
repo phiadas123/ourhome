@@ -337,3 +337,62 @@ img { max-width: 100%; display: block; }
 .tally .tally-room { margin-left: auto; text-align: right; }
 
 .photo-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; margin-top: 4px; }
+
+/* ---------- design board ---------- */
+.design-hint { display: block; margin: -16px 0 36px; font: italic 400 19px/1.3 var(--display); color: var(--muted); text-align: left; }
+.design-hint:hover { color: var(--ink); }
+.design-strip { display: flex; align-items: center; gap: 22px; margin: -12px 0 40px; flex-wrap: wrap; text-align: left; }
+.strip-colors { display: flex; }
+.strip-colors .dot { width: 30px; height: 30px; border-radius: 50%; border: 2px solid var(--bg); margin-left: -8px; box-shadow: 0 0 0 1px var(--line); }
+.strip-colors .dot:first-child { margin-left: 0; }
+.strip-pics { display: flex; gap: 6px; }
+.strip-pics img { width: 44px; height: 44px; object-fit: cover; }
+.design-strip:hover .strip-pics img { opacity: .85; }
+
+.board { background: var(--surface); border: 1px solid var(--line); padding: clamp(22px, 3vw, 40px); margin-bottom: 64px; display: flex; flex-direction: column; gap: 34px; }
+.board-head h3 { font: 400 34px/1 var(--display); margin: 0; }
+.board-label { font-size: 11px; letter-spacing: .16em; color: var(--muted); margin: 0 0 16px; }
+.palette { display: flex; flex-wrap: wrap; gap: 22px; }
+.swatch { display: flex; flex-direction: column; align-items: center; gap: 10px; width: 76px; }
+.swatch-dot { width: 64px; height: 64px; border-radius: 50%; box-shadow: inset 0 0 0 1px rgba(0,0,0,.08); transition: transform .25s; display: grid; place-items: center; }
+.swatch:hover .swatch-dot { transform: scale(1.06); }
+.swatch-name { font-size: 12px; letter-spacing: .04em; color: var(--muted); text-align: center; line-height: 1.3; word-break: break-word; }
+.swatch.add .swatch-dot { border: 1px dashed var(--soft); box-shadow: none; font: 300 30px/1 var(--display); color: var(--muted); }
+.textures { display: flex; flex-wrap: wrap; gap: 16px; }
+.texture { width: 120px; display: flex; flex-direction: column; gap: 8px; text-align: left; }
+.texture img, .texture.add .texture-plus { width: 120px; height: 120px; object-fit: cover; }
+.texture span:last-child { font-size: 12px; letter-spacing: .04em; color: var(--muted); }
+.texture.add .texture-plus, .inspo-add .texture-plus { display: grid; place-items: center; border: 1px dashed var(--soft); font: 300 34px/1 var(--display); color: var(--muted); }
+.texture:hover img { opacity: .88; }
+.inspo { columns: 4 200px; column-gap: 14px; }
+.inspo-pic, .inspo-add { display: block; width: 100%; margin: 0 0 14px; break-inside: avoid; }
+.inspo-pic img { width: 100%; height: auto; transition: opacity .2s; }
+.inspo-pic:hover img { opacity: .88; }
+.inspo-add { display: flex; flex-direction: column; gap: 8px; text-align: left; }
+.inspo-add .texture-plus { width: 100%; aspect-ratio: 4 / 3; }
+.inspo-add span:last-child { font-size: 12px; letter-spacing: .04em; color: var(--muted); }
+
+.color-pick { display: flex; gap: 24px; align-items: center; }
+.color-big { width: 110px; height: 110px; border-radius: 50%; flex: 0 0 auto; position: relative; cursor: pointer; box-shadow: inset 0 0 0 1px rgba(0,0,0,.1); }
+.color-big input { position: absolute; inset: 0; opacity: 0; width: 100%; height: 100%; cursor: pointer; }
+.color-fields { flex: 1; display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.presets { display: flex; flex-wrap: wrap; gap: 10px; }
+.preset { width: 34px; height: 34px; border-radius: 50%; box-shadow: inset 0 0 0 1px rgba(0,0,0,.1); }
+.preset.on { outline: 2px solid var(--ink); outline-offset: 2px; }
+.texture-preview { width: 140px; height: 140px; object-fit: cover; }
+.link-row { display: flex; gap: 10px; align-items: flex-end; }
+.link-row input { flex: 1; }
+.inspo-pending { display: grid; grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); gap: 10px; }
+.pending { position: relative; aspect-ratio: 1; background: var(--surface-2); }
+.pending img { width: 100%; height: 100%; object-fit: cover; }
+.pending button { position: absolute; top: 4px; right: 4px; width: 26px; height: 26px; border-radius: 50%; background: var(--glass); font-size: 16px; line-height: 1; }
+.inspo-full { width: 100%; max-height: 60vh; object-fit: contain; background: var(--surface-2); }
+@media (max-width: 760px) {
+  .board { margin-bottom: 44px; gap: 28px; }
+  .swatch { width: 64px; }
+  .swatch-dot { width: 54px; height: 54px; }
+  .texture, .texture img, .texture.add .texture-plus { width: 96px; }
+  .texture img, .texture.add .texture-plus { height: 96px; }
+  .inspo { columns: 2; column-gap: 10px; }
+  .color-big { width: 88px; height: 88px; }
+}

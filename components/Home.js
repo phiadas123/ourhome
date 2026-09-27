@@ -13,6 +13,7 @@ const newId = () =>
       });
 
 const sectionsOf = (room) => room?.sections || [];
+const designOf = (room) => ({ colors: [], textures: [], inspiration: [], ...(room?.design || {}) });
 const strip = ({ _local, _reading, ...row }) => row;
 // A piece only shows as "finding details" while it's actually being read (not forever if reading was interrupted).
 const isLoading = (it) => it.status === "loading" && (it._reading || Date.now() - new Date(it.created_at).getTime() < 45000);
@@ -255,7 +256,7 @@ export default function Home({ householdId }) {
     const { error } = await sb.from("rooms").delete().eq("id", r.id);
     if (error) { showToast("That room didn't delete. Try again."); load(); return; }
     showToast(`Removed ${r.name}${saved.length ? ` and ${saved.length} piece${saved.length === 1 ? "" : "s"}` : ""}.`, async () => {
-      const { error: e1 } = await sb.from("rooms").insert({ id: r.id, household_id: r.household_id, name: r.name, sections: r.sections, position: r.position, created_at: r.created_at });
+      const { error: e1 } = await sb.from("rooms").insert({ id: r.id, household_id: r.household_id, name: r.name, sections: r.sections, design: r.design || {}, position: r.position, created_at: r.created_at });
       if (!e1 && saved.length) await sb.from("items").insert(saved.map(strip));
       await load();
     });
@@ -304,6 +305,24 @@ export default function Home({ householdId }) {
       if (saved.length) await sb.from("items").insert(saved.map(strip));
       await load();
     });
+  }
+
+  /* ---------- design board ---------- */
+  async function saveDesign(r, next, undoMessage) {
+    const before = designOf(r);
+    setRooms((p) => p.map((x) => (x.id === r.id ? { ...x, design: next } : x)));
+    setSheet(null);
+    const { error } = await sb.from("rooms").update({ design: next }).eq("id", r.id);
+    if (error) { showToast("That didn't save. Try again."); load(); return; }
+    if (undoMessage) {
+      showToast(undoMessage, async () => {
+        setRooms((p) => p.map((x) => (x.id === r.id ? { ...x, design: before } : x)));
+        await sb.from("rooms").update({ design: before }).eq("id", r.id);
+      });
+    }
+  }
+  function upsertIn(list, entry) {
+    return list.some((x) => x.id === entry.id) ? list.map((x) => (x.id === entry.id ? entry : x)) : [...list, entry];
   }
 
   async function saveHome(patch) {
@@ -358,6 +377,10 @@ export default function Home({ householdId }) {
                 key={r.id} room={r} single={!!current} onOpen={() => openRoom(r.id)} items={items.filter((i) => i.room_id === r.id)} currency={currency}
                 selecting={selecting} selected={selected} justAdded={justAdded} secKey={secKey}
                 onEditRoom={() => setSheet({ kind: "editRoom", roomId: r.id })}
+                onColor={(id) => setSheet({ kind: "color", roomId: r.id, id })}
+                onTexture={(id) => setSheet({ kind: "texture", roomId: r.id, id })}
+                onAddInspo={() => setSheet({ kind: "inspo", roomId: r.id })}
+                onViewInspo={(id) => setSheet({ kind: "viewInspo", roomId: r.id, id })}
                 onAddSection={() => setSheet({ kind: "addSection", roomId: r.id })}
                 onEditSection={(s) => setSheet({ kind: "editSection", roomId: r.id, section: s })}
                 onAdd={(s) => setAdding({ roomId: r.id, section: s })}
@@ -442,6 +465,38 @@ export default function Home({ householdId }) {
           removeLabel={`Remove section${sheetSectionItems.length ? ` and ${sheetSectionItems.length} piece${sheetSectionItems.length === 1 ? "" : "s"}` : ""}`}
           onRemove={() => removeSection(sheetRoom, sheet.section)} />
       )}
+      {sheet?.kind === "color" && sheetRoom && (
+        <ColorSheet
+          initial={designOf(sheetRoom).colors.find((c) => c.id === sheet.id)}
+          onClose={() => setSheet(null)}
+          onSave={(c) => { const d = designOf(sheetRoom); saveDesign(sheetRoom, { ...d, colors: upsertIn(d.colors, c) }); }}
+          onRemove={(c) => { const d = designOf(sheetRoom); saveDesign(sheetRoom, { ...d, colors: d.colors.filter((x) => x.id !== c.id) }, "Colour removed."); }}
+        />
+      )}
+      {sheet?.kind === "texture" && sheetRoom && (
+        <TextureSheet
+          initial={designOf(sheetRoom).textures.find((t) => t.id === sheet.id)}
+          onUpload={uploadPhoto}
+          onClose={() => setSheet(null)}
+          onSave={(t) => { const d = designOf(sheetRoom); saveDesign(sheetRoom, { ...d, textures: upsertIn(d.textures, t) }); }}
+          onRemove={(t) => { const d = designOf(sheetRoom); saveDesign(sheetRoom, { ...d, textures: d.textures.filter((x) => x.id !== t.id) }, "Texture removed."); }}
+        />
+      )}
+      {sheet?.kind === "inspo" && sheetRoom && (
+        <InspoSheet
+          room={sheetRoom} onUpload={uploadPhoto}
+          onClose={() => setSheet(null)}
+          onSave={(photos) => { const d = designOf(sheetRoom); saveDesign(sheetRoom, { ...d, inspiration: [...d.inspiration, ...photos] }); }}
+        />
+      )}
+      {sheet?.kind === "viewInspo" && sheetRoom && designOf(sheetRoom).inspiration.find((x) => x.id === sheet.id) && (
+        <InspoViewer
+          photo={designOf(sheetRoom).inspiration.find((x) => x.id === sheet.id)}
+          onClose={() => setSheet(null)}
+          onSave={(ph) => { const d = designOf(sheetRoom); saveDesign(sheetRoom, { ...d, inspiration: upsertIn(d.inspiration, ph) }); }}
+          onRemove={(ph) => { const d = designOf(sheetRoom); saveDesign(sheetRoom, { ...d, inspiration: d.inspiration.filter((x) => x.id !== ph.id) }, "Photo removed."); }}
+        />
+      )}
       {sheet?.kind === "settings" && home && (
         <SettingsSheet home={home} onClose={() => setSheet(null)} onSave={saveHome} onCopied={() => showToast("Invite code copied.")} />
       )}
@@ -458,7 +513,7 @@ export default function Home({ householdId }) {
 
 /* ---------- one room, with all its sections ---------- */
 
-function RoomBlock({ room, single, onOpen, items, currency, selecting, selected, justAdded, secKey, onEditRoom, onAddSection, onEditSection, onAdd, onSelect, onEdit, onToggle, onRemove }) {
+function RoomBlock({ room, single, onOpen, onColor, onTexture, onAddInspo, onViewInspo, items, currency, selecting, selected, justAdded, secKey, onEditRoom, onAddSection, onEditSection, onAdd, onSelect, onEdit, onToggle, onRemove }) {
   const t = totals(items);
   const names = [...sectionsOf(room), ...new Set(items.map((i) => i.section).filter((s) => !sectionsOf(room).includes(s)))];
   return (
@@ -476,6 +531,10 @@ function RoomBlock({ room, single, onOpen, items, currency, selecting, selected,
           <button className="btn ghost" onClick={onEditRoom}>Edit room</button>
         </div>
       </div>
+
+      {single
+        ? <DesignBoard design={designOf(room)} onColor={onColor} onTexture={onTexture} onAddInspo={onAddInspo} onViewInspo={onViewInspo} />
+        : <DesignStrip design={designOf(room)} onOpen={onOpen} />}
 
       {!names.length && (
         <button className="add-bar" onClick={onAddSection}>
@@ -892,5 +951,238 @@ function PhotoPicker({ value, onChange, onUpload }) {
       )}
       {error && <small className="field-hint error">{error}</small>}
     </div>
+  );
+}
+
+
+/* ---------- design board ---------- */
+
+function DesignStrip({ design, onOpen }) {
+  const { colors, textures, inspiration } = design;
+  if (!colors.length && !textures.length && !inspiration.length) {
+    return <button className="design-hint" onClick={onOpen}>+ Add a design board with colours, textures and inspiration</button>;
+  }
+  const pics = [...textures, ...inspiration].slice(0, 6);
+  return (
+    <button className="design-strip" onClick={onOpen} aria-label="Open design board">
+      {colors.length > 0 && (
+        <span className="strip-colors">
+          {colors.map((c) => <span key={c.id} className="dot" style={{ background: c.hex }} />)}
+        </span>
+      )}
+      {pics.length > 0 && (
+        <span className="strip-pics">
+          {pics.map((p) => (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img key={p.id} src={p.url} alt="" loading="lazy" referrerPolicy="no-referrer" />
+          ))}
+        </span>
+      )}
+    </button>
+  );
+}
+
+function DesignBoard({ design, onColor, onTexture, onAddInspo, onViewInspo }) {
+  const { colors, textures, inspiration } = design;
+  return (
+    <div className="board">
+      <div className="board-head"><h3>Design</h3></div>
+
+      <div className="board-group">
+        <p className="board-label">Colour palette</p>
+        <div className="palette">
+          {colors.map((c) => (
+            <button key={c.id} className="swatch" onClick={() => onColor(c.id)} aria-label={`Edit ${c.name || c.hex}`}>
+              <span className="swatch-dot" style={{ background: c.hex }} />
+              <span className="swatch-name">{c.name || c.hex.toUpperCase()}</span>
+            </button>
+          ))}
+          <button className="swatch add" onClick={() => onColor(null)} aria-label="Add a colour">
+            <span className="swatch-dot">+</span>
+            <span className="swatch-name">Add colour</span>
+          </button>
+        </div>
+      </div>
+
+      <div className="board-group">
+        <p className="board-label">Textures</p>
+        <div className="textures">
+          {textures.map((t) => (
+            <button key={t.id} className="texture" onClick={() => onTexture(t.id)} aria-label={`Edit ${t.name || "texture"}`}>
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={t.url} alt="" loading="lazy" referrerPolicy="no-referrer" />
+              <span>{t.name || "Texture"}</span>
+            </button>
+          ))}
+          <button className="texture add" onClick={() => onTexture(null)}>
+            <span className="texture-plus">+</span>
+            <span>Add texture</span>
+          </button>
+        </div>
+      </div>
+
+      <div className="board-group">
+        <p className="board-label">Inspiration</p>
+        <div className="inspo">
+          {inspiration.map((ph) => (
+            <button key={ph.id} className="inspo-pic" onClick={() => onViewInspo(ph.id)} aria-label={ph.caption || "Inspiration photo"}>
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={ph.url} alt="" loading="lazy" referrerPolicy="no-referrer" />
+            </button>
+          ))}
+          <button className="inspo-add" onClick={onAddInspo}>
+            <span className="texture-plus">+</span>
+            <span>Add inspiration</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const PRESET_COLORS = ["#F4F1EA", "#E8E1D5", "#D8CBB8", "#B9A589", "#8C7355", "#5E4B3C", "#3B3833", "#9AA394", "#6F7D6A", "#7B8C93", "#34424A", "#C9A9A0", "#A45A4A", "#D6B26E"];
+
+function ColorSheet({ initial, onClose, onSave, onRemove }) {
+  const [hex, setHex] = useState(initial?.hex || "#D8CBB8");
+  const [name, setName] = useState(initial?.name || "");
+  const valid = /^#[0-9a-f]{6}$/i.test(hex);
+  return (
+    <Sheet title={initial ? "Edit colour" : "Add a colour"} onClose={onClose}>
+      <form className="form" onSubmit={(e) => { e.preventDefault(); if (valid) onSave({ id: initial?.id || newId(), hex, name: name.trim() }); }}>
+        <div className="color-pick">
+          <label className="color-big" style={{ background: valid ? hex : "transparent" }}>
+            <input type="color" value={valid ? hex : "#000000"} onChange={(e) => setHex(e.target.value)} aria-label="Pick a colour" />
+          </label>
+          <div className="color-fields">
+            <label className="field"><span>Colour code</span>
+              <input value={hex} onChange={(e) => { let v = e.target.value.trim(); if (v && !v.startsWith("#")) v = "#" + v; setHex(v); }} maxLength={7} placeholder="#D8CBB8" />
+            </label>
+            <label className="field"><span>Name (optional)</span>
+              <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Warm white" maxLength={30} />
+            </label>
+          </div>
+        </div>
+        <p className="note">Tap the big circle to choose any colour, or pick one of these:</p>
+        <div className="presets">
+          {PRESET_COLORS.map((c) => (
+            <button type="button" key={c} className={`preset${hex.toLowerCase() === c.toLowerCase() ? " on" : ""}`} style={{ background: c }} onClick={() => setHex(c)} aria-label={c} />
+          ))}
+        </div>
+        <div className="sheet-foot">
+          {initial ? <button type="button" className="btn ghost danger" onClick={() => onRemove(initial)}>Remove</button> : <span />}
+          <button className="btn primary" disabled={!valid}>{initial ? "Save" : "Add colour"}</button>
+        </div>
+      </form>
+    </Sheet>
+  );
+}
+
+function TextureSheet({ initial, onUpload, onClose, onSave, onRemove }) {
+  const [url, setUrl] = useState(initial?.url || "");
+  const [name, setName] = useState(initial?.name || "");
+  const clean = url.trim() ? normalizeUrl(url) : null;
+  return (
+    <Sheet title={initial ? "Edit texture" : "Add a texture"} onClose={onClose}>
+      <form className="form" onSubmit={(e) => { e.preventDefault(); if (clean) onSave({ id: initial?.id || newId(), url: clean, name: name.trim() }); }}>
+        {clean && (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img className="texture-preview" src={clean} alt="" referrerPolicy="no-referrer" />
+        )}
+        <PhotoPicker value={url} onChange={setUrl} onUpload={onUpload} />
+        <label className="field"><span>Name (optional)</span>
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Oak, Bouclé, Travertine" maxLength={30} />
+        </label>
+        <div className="sheet-foot">
+          {initial ? <button type="button" className="btn ghost danger" onClick={() => onRemove(initial)}>Remove</button> : <span />}
+          <button className="btn primary" disabled={!clean}>{initial ? "Save" : "Add texture"}</button>
+        </div>
+      </form>
+    </Sheet>
+  );
+}
+
+function InspoSheet({ room, onUpload, onClose, onSave }) {
+  const [photos, setPhotos] = useState([]);
+  const [link, setLink] = useState("");
+  const [busy, setBusy] = useState(0);
+  const [error, setError] = useState("");
+  const fileRef = useRef(null);
+
+  async function pick(e) {
+    const files = [...(e.target.files || [])].filter((f) => f.type.startsWith("image/"));
+    e.target.value = "";
+    if (!files.length) return;
+    setBusy((b) => b + files.length); setError("");
+    await Promise.all(files.map(async (f) => {
+      try {
+        const url = await onUpload(f);
+        setPhotos((p) => [...p, { id: newId(), url, caption: "" }]);
+      } catch { setError("Some photos didn't upload. Try those again."); }
+      setBusy((b) => b - 1);
+    }));
+  }
+  function addLink() {
+    const u = normalizeUrl(link);
+    if (!u) { setError("That doesn't look like an image link."); return; }
+    setPhotos((p) => [...p, { id: newId(), url: u, caption: "" }]);
+    setLink(""); setError("");
+  }
+
+  return (
+    <Sheet title={`Inspiration for ${room.name}`} onClose={onClose}>
+      <div className="form">
+        <div className="photo-actions">
+          <button type="button" className="btn" onClick={() => fileRef.current?.click()}>{busy ? `Uploading ${busy}…` : "Upload photos"}</button>
+          <span className="note">You can choose several at once.</span>
+          <input ref={fileRef} type="file" accept="image/*" multiple hidden onChange={pick} />
+        </div>
+        <div className="field">
+          <span>Or paste an image link</span>
+          <div className="link-row">
+            <input type="url" inputMode="url" value={link} onChange={(e) => setLink(e.target.value)} placeholder="https://…"
+              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addLink(); } }} />
+            <button type="button" className="btn" onClick={addLink} disabled={!link.trim()}>Add</button>
+          </div>
+          <small className="field-hint">From Pinterest or any website: right-click (or press and hold) a photo, choose &ldquo;Copy image address&rdquo;, and paste it here.</small>
+        </div>
+        {error && <p className="field-hint error">{error}</p>}
+        {photos.length > 0 && (
+          <div className="inspo-pending">
+            {photos.map((ph) => (
+              <div key={ph.id} className="pending">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={ph.url} alt="" referrerPolicy="no-referrer" />
+                <button type="button" aria-label="Remove" onClick={() => setPhotos((p) => p.filter((x) => x.id !== ph.id))}>×</button>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="sheet-foot">
+          <button type="button" className="btn ghost" onClick={onClose}>Cancel</button>
+          <button type="button" className="btn primary" disabled={!photos.length || busy > 0} onClick={() => onSave(photos)}>
+            {photos.length ? `Add ${photos.length} photo${photos.length === 1 ? "" : "s"}` : "Add photos"}
+          </button>
+        </div>
+      </div>
+    </Sheet>
+  );
+}
+
+function InspoViewer({ photo, onClose, onSave, onRemove }) {
+  const [caption, setCaption] = useState(photo.caption || "");
+  return (
+    <Sheet title="Inspiration" onClose={onClose}>
+      <form className="form" onSubmit={(e) => { e.preventDefault(); onSave({ ...photo, caption: caption.trim() }); }}>
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img className="inspo-full" src={photo.url} alt="" referrerPolicy="no-referrer" />
+        <label className="field"><span>Note (optional)</span>
+          <input value={caption} onChange={(e) => setCaption(e.target.value)} placeholder="What do you love about it?" maxLength={120} />
+        </label>
+        <div className="sheet-foot">
+          <button type="button" className="btn ghost danger" onClick={() => onRemove(photo)}>Remove</button>
+          <button className="btn primary">Done</button>
+        </div>
+      </form>
+    </Sheet>
   );
 }
