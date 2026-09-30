@@ -315,6 +315,13 @@ export default function Home({ householdId }) {
     });
   }
 
+  async function reorderSections(r, next) {
+    setSheet(null);
+    setRooms((p) => p.map((x) => (x.id === r.id ? { ...x, sections: next } : x)));
+    const { error } = await sb.from("rooms").update({ sections: next }).eq("id", r.id);
+    if (error) { showToast("The new order didn't save. Try again."); load(); }
+  }
+
   /* ---------- design board ---------- */
   async function saveDesign(r, next, undoMessage) {
     const before = designOf(r);
@@ -386,6 +393,7 @@ export default function Home({ householdId }) {
                 selecting={selecting} selected={selected} justAdded={justAdded} secKey={secKey}
                 onEditRoom={() => setSheet({ kind: "editRoom", roomId: r.id })}
                 onSwatch={(id) => setSheet({ kind: "swatch", roomId: r.id, id })}
+                onReorder={() => setSheet({ kind: "reorder", roomId: r.id })}
                 onAddInspo={() => setSheet({ kind: "inspo", roomId: r.id })}
                 onViewInspo={(id) => setSheet({ kind: "viewInspo", roomId: r.id, id })}
                 onAddSection={() => setSheet({ kind: "addSection", roomId: r.id })}
@@ -472,6 +480,14 @@ export default function Home({ householdId }) {
           removeLabel={`Remove section${sheetSectionItems.length ? ` and ${sheetSectionItems.length} piece${sheetSectionItems.length === 1 ? "" : "s"}` : ""}`}
           onRemove={() => removeSection(sheetRoom, sheet.section)} />
       )}
+      {sheet?.kind === "reorder" && sheetRoom && (
+        <ReorderSheet
+          title={`Reorder ${sheetRoom.name}`}
+          initial={[...sectionsOf(sheetRoom), ...new Set(sheetRoomItems.map((i) => i.section).filter((x) => !sectionsOf(sheetRoom).includes(x)))]}
+          onClose={() => setSheet(null)}
+          onSave={(next) => reorderSections(sheetRoom, next)}
+        />
+      )}
       {sheet?.kind === "swatch" && sheetRoom && (
         <SwatchSheet
           initial={designOf(sheetRoom).palette.find((x) => x.id === sheet.id)}
@@ -512,7 +528,7 @@ export default function Home({ householdId }) {
 
 /* ---------- one room, with all its sections ---------- */
 
-function RoomBlock({ room, single, onOpen, onSwatch, onAddInspo, onViewInspo, items, currency, selecting, selected, justAdded, secKey, onEditRoom, onAddSection, onEditSection, onAdd, onSelect, onEdit, onToggle, onRemove }) {
+function RoomBlock({ room, single, onOpen, onSwatch, onReorder, onAddInspo, onViewInspo, items, currency, selecting, selected, justAdded, secKey, onEditRoom, onAddSection, onEditSection, onAdd, onSelect, onEdit, onToggle, onRemove }) {
   const t = totals(items);
   const names = [...sectionsOf(room), ...new Set(items.map((i) => i.section).filter((s) => !sectionsOf(room).includes(s)))];
   return (
@@ -527,6 +543,7 @@ function RoomBlock({ room, single, onOpen, onSwatch, onAddInspo, onViewInspo, it
         <div className="head-actions">
           {!single && <button className="btn ghost" onClick={onOpen}>Open room</button>}
           <button className="btn" onClick={onAddSection}>+ Section</button>
+          {names.length > 1 && <button className="btn ghost" onClick={onReorder}>Reorder sections</button>}
           <button className="btn ghost" onClick={onEditRoom}>Edit room</button>
         </div>
       </div>
@@ -1178,6 +1195,45 @@ function InspoViewer({ photo, onClose, onSave, onRemove }) {
           <button className="btn primary">Done</button>
         </div>
       </form>
+    </Sheet>
+  );
+}
+
+
+function ReorderSheet({ title, initial, onClose, onSave }) {
+  const [list, setList] = useState(initial);
+  const [dragging, setDragging] = useState(null);
+  const move = (from, to) => {
+    if (to < 0 || to >= list.length || from === to) return;
+    setList((l) => { const n = [...l]; const [x] = n.splice(from, 1); n.splice(to, 0, x); return n; });
+  };
+  return (
+    <Sheet title={title} onClose={onClose}>
+      <div className="form">
+        <p className="note">Use the arrows to move sections up or down. On a computer you can also drag them.</p>
+        <ol className="reorder">
+          {list.map((name, i) => (
+            <li key={name} draggable
+              className={dragging === i ? "dragging" : ""}
+              onDragStart={() => setDragging(i)}
+              onDragOver={(e) => { e.preventDefault(); if (dragging !== null && dragging !== i) { move(dragging, i); setDragging(i); } }}
+              onDragEnd={() => setDragging(null)}>
+              <span className="grip" aria-hidden="true">⋮⋮</span>
+              <span className="reorder-name">{name}</span>
+              <button type="button" className="arrow" onClick={() => move(i, i - 1)} disabled={i === 0} aria-label={`Move ${name} up`}>
+                <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 10l5-5 5 5" fill="none" stroke="currentColor" strokeWidth="1.4" /></svg>
+              </button>
+              <button type="button" className="arrow" onClick={() => move(i, i + 1)} disabled={i === list.length - 1} aria-label={`Move ${name} down`}>
+                <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 6l5 5 5-5" fill="none" stroke="currentColor" strokeWidth="1.4" /></svg>
+              </button>
+            </li>
+          ))}
+        </ol>
+        <div className="sheet-foot">
+          <button type="button" className="btn ghost" onClick={onClose}>Cancel</button>
+          <button type="button" className="btn primary" onClick={() => onSave(list)}>Save order</button>
+        </div>
+      </div>
     </Sheet>
   );
 }

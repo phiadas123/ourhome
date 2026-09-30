@@ -400,3 +400,14 @@ img { max-width: 100%; display: block; }
 .seg { display: inline-flex; border: 1px solid var(--line); align-self: flex-start; }
 .seg button { padding: 10px 22px; font-size: 13px; letter-spacing: .06em; color: var(--muted); min-height: 40px; transition: background .2s, color .2s; }
 .seg button.on { background: var(--btn); color: var(--btn-ink); }
+
+/* ---------- reorder ---------- */
+.reorder { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line); }
+.reorder li { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--line); background: var(--surface); cursor: grab; }
+.reorder li.dragging { opacity: .5; }
+.grip { color: var(--soft); font-size: 14px; letter-spacing: -2px; width: 18px; }
+.reorder-name { flex: 1; font: 400 22px/1.2 var(--display); }
+.arrow { width: 44px; height: 44px; display: grid; place-items: center; color: var(--ink); border: 1px solid var(--line); }
+.arrow svg { width: 16px; height: 16px; }
+.arrow:disabled { opacity: .25; }
+.arrow:not(:disabled):hover { border-color: var(--ink); }
